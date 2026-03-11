@@ -24,8 +24,7 @@ class UdpUpstreamResolver(Resolver):
         self,
         context: QueryContext,
         query: dns.message.Message,
-        query_wire: bytes,
-    ) -> bytes:
+    ) -> dns.message.Message:
         last_error: Exception | None = None
 
         for upstream in self._upstreams:
@@ -37,7 +36,7 @@ class UdpUpstreamResolver(Resolver):
                     timeout=upstream.timeout,
                     ignore_unexpected=True,
                 )
-                return response.to_wire()
+                return response
             except Exception as exc:  # pragma: no cover
                 last_error = exc
                 logger.warning(
@@ -62,4 +61,4 @@ class UdpUpstreamResolver(Resolver):
 
         fallback = dns.message.make_response(query)
         fallback.set_rcode(dns.rcode.SERVFAIL)
-        return fallback.to_wire()
+        return fallback

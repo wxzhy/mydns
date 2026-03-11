@@ -50,7 +50,7 @@ class _DnsUdpProtocol(asyncio.DatagramProtocol):
             return
 
         if response and self._transport:
-            self._transport.sendto(response, client)
+            self._transport.sendto(response.to_wire(), client)
 
     def error_received(self, exc: Exception) -> None:
         logger.warning("UDP server error: %s", exc)

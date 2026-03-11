@@ -13,6 +13,5 @@ class Resolver(ABC):
         self,
         context: QueryContext,
         query: dns.message.Message,
-        query_wire: bytes,
-    ) -> bytes:
-        """Resolve one DNS query and return a raw DNS response packet."""
+    ) -> dns.message.Message:
+        """Resolve one DNS query and return DNS response message."""
