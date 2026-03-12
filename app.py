@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from cache.dns_cache import DnsLruCache
 from config import AppConfig
 from core.hooks import RequestHooks
 from core.pipeline import RequestPipeline
@@ -12,7 +13,16 @@ class Application:
     def __init__(self, config: AppConfig) -> None:
         hooks = RequestHooks(build_default_hooks())
         resolver = ResolverManager.from_upstreams(config.upstreams, hooks=hooks)
-        pipeline = RequestPipeline(resolver, hooks=hooks)
+        dns_cache = (
+            DnsLruCache(max_size=config.cache.max_size)
+            if config.cache.enabled
+            else None
+        )
+        pipeline = RequestPipeline(
+            resolver,
+            hooks=hooks,
+            dns_cache=dns_cache,
+        )
         self.config = config
         self.server = UdpDnsServer(
             host=config.server.host,

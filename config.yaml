@@ -1,0 +1,19 @@
+server:
+  host: 0.0.0.0
+  port: 5335
+  max_packet_size: 4096
+
+logging:
+  level: DEBUG
+
+cache:
+  enabled: true
+  max_size: 10000
+
+upstreams:
+  - host: 223.5.5.5
+    port: 53
+    timeout: 2.0
+  - host: 8.8.8.8
+    port: 53
+    timeout: 2.0

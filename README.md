@@ -7,12 +7,13 @@
 - 异步 UDP DNS 监听
 - 支持多个上游 DNS 转发
 - 并发请求上游并返回最快成功响应
+- 内置基于 TTL 的 LRU DNS 缓存（请求前命中、完成后回写）
 - 三阶段 Hook 流水线：
   - 请求阶段：`before_upstream`
   - 上游阶段：`after_upstream`
   - 响应阶段：`before_response`
 - 清晰分层：`server -> pipeline -> resolver`
-- 基于 TOML 的配置，带默认值
+- 基于 YAML 的配置，带默认值
 
 ## 项目结构
 
@@ -35,34 +36,36 @@
 uv run python main.py
 ```
 
-默认读取 `./config.toml`。
+默认读取 `./config.yaml`。
 
 ## 配置说明
 
 示例：
 
-```toml
-[server]
-host = "0.0.0.0"
-port = 5353
-max_packet_size = 4096
+```yaml
+server:
+  host: 0.0.0.0
+  port: 5353
+  max_packet_size: 4096
 
-[logging]
-level = "INFO"
+logging:
+  level: INFO
 
-[[upstreams]]
-host = "223.5.5.5"
-port = 53
-timeout = 2.0
+cache:
+  enabled: true
+  max_size: 10000
 
-[[upstreams]]
-host = "8.8.8.8"
-port = 53
-timeout = 2.0
+upstreams:
+  - host: 223.5.5.5
+    port: 53
+    timeout: 2.0
+  - host: 8.8.8.8
+    port: 53
+    timeout: 2.0
 ```
 
 使用自定义配置文件：
 
 ```bash
-uv run python main.py --config ./config.toml
+uv run python main.py --config ./config.yaml
 ```

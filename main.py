@@ -20,7 +20,7 @@ def parse_args() -> argparse.Namespace:
         "-c",
         "--config",
         default=None,
-        help="Path to TOML config file (default: ./config.toml).",
+        help="Path to YAML config file (default: ./config.yaml).",
     )
     return parser.parse_args()
 
