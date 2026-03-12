@@ -20,7 +20,7 @@ class ResponseDebugHook(ResponseHook):
         response: dns.message.Message,
     ) -> dns.message.Message | None:
         logger.debug(
-            "最终结果 source=%s client=%s:%s txid=%s qtype=%s domain=%s winner=%s attempts=%s rtt=%s result=%s",
+            "最终结果 source=%s client=%s:%s txid=%s qtype=%s domain=%s winner=%s attempts=%s rtt=%s selected_ip=%s selected_ip_rtt=%s result=%s",
             context.tags.get("response_source", "-"),
             context.client_host,
             context.client_port,
@@ -32,6 +32,12 @@ class ResponseDebugHook(ResponseHook):
             f"{context.resolve_rtt_ms:.2f}ms"
             if context.resolve_rtt_ms is not None
             else "-",
+            context.selected_ip or "-",
+            (
+                f"{context.selected_ip_rtt_ms:.2f}ms"
+                if context.selected_ip_rtt_ms is not None
+                else "-"
+            ),
             summarize_dns_result(response),
         )
         return None

@@ -25,6 +25,8 @@ class QueryContext:
     resolve_rtt_ms: float | None = None
     resolver_attempts: int = 0
     resolver_errors: list[str] = field(default_factory=list)
+    selected_ip: str | None = None
+    selected_ip_rtt_ms: float | None = None
     tags: dict[str, Any] = field(default_factory=dict)
 
     @property
