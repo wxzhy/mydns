@@ -12,8 +12,22 @@ cache:
 
 upstreams:
   - host: 223.5.5.5
+    protocol: udp
     port: 53
-    timeout: 2.0
+    timeout: 5.0
   - host: 8.8.8.8
+    protocol: udp
     port: 53
-    timeout: 2.0
+    timeout: 5.0
+  - host: 1.1.1.1
+    protocol: udp
+    port: 53
+    timeout: 5.0
+  - host: 114.114.114.114
+    protocol: udp
+    port: 53
+    timeout: 5.0
+  - host: 119.29.29.29
+    protocol: udp
+    port: 53
+    timeout: 5.0

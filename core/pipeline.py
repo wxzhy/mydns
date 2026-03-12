@@ -7,7 +7,7 @@ import dns.rcode
 from core.context import ClientAddress, QueryContext
 from core.hooks import RequestHooks
 from logger import get_logger
-from resolvers.resolver import Resolver
+from resolvers.resolver import ResolverProtocol
 from utils.decode_query import decode_query
 
 logger = get_logger(__name__)
@@ -16,7 +16,7 @@ logger = get_logger(__name__)
 class RequestPipeline:
     def __init__(
         self,
-        resolver: Resolver,
+        resolver: ResolverProtocol,
         hooks: RequestHooks | None = None,
         dns_cache: DnsLruCache | None = None,
     ) -> None:

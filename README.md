@@ -1,11 +1,11 @@
 # mydns
 
-一个简单、可扩展的 UDP DNS 转发器。
+一个简单、可扩展的 DNS 转发器。
 
 ## 功能特性
 
 - 异步 UDP DNS 监听
-- 支持多个上游 DNS 转发
+- 支持多协议上游 DNS 转发：`udp` / `tcp` / `dot` / `doh` / `doq`
 - 并发请求上游并返回最快成功响应
 - 内置基于 TTL 的 LRU DNS 缓存（请求前命中、完成后回写）
 - 三阶段 Hook 流水线：
@@ -25,9 +25,13 @@
 - `core/hooks.py`：阶段 Hook 协议与执行器
 - `resolvers/resolver.py`：Resolver 抽象
 - `resolvers/udp_resolver.py`：UDP 上游解析实现
-- `selector/resolver_manager.py`：上游 Resolver 初始化与选择管理
+- `resolvers/dot_resolver.py`：DoT 上游解析实现
+- `resolvers/doh_resolver.py`：DoH 上游解析实现
+- `resolvers/doq_resolver.py`：DoQ 上游解析实现
+- `selector/resolver_manager.py`：上游 Resolver 初始化与并发选择管理
 - `rules/request`：请求阶段规则（域名拦截 / hosts / 请求日志）
-- `rules/upstream`：上游阶段规则（上游日志 / 响应改写）
+- `rules/upstream`：上游阶段规则（上游日志 / A/AAAA IP 测速与响应改写）
+- `rules/upstream/benchmark`：上游阶段测速模块（`ping` / `tcping` / `scorer`）
 - `rules/response`：响应阶段规则（最终结果日志 / 响应改写）
 
 ## 快速开始
@@ -57,12 +61,47 @@ cache:
 
 upstreams:
   - host: 223.5.5.5
+    protocol: udp
     port: 53
     timeout: 2.0
   - host: 8.8.8.8
+    protocol: tcp
     port: 53
+    ecs: 1.2.3.0/24
+    timeout: 2.0
+  - host: 1.1.1.1
+    protocol: dot
+    port: 853
+    verify: true
+    hostname: cloudflare-dns.com
+    timeout: 2.0
+  - host: 1.1.1.1
+    protocol: doq
+    port: 853
+    verify: true
+    hostname: cloudflare-dns.com
+    timeout: 2.0
+  - host: 1.1.1.1
+    protocol: doh
+    port: 443
+    http_host: cloudflare-dns.com
+    path: /dns-query
+    verify: true
+    hostname: cloudflare-dns.com
     timeout: 2.0
 ```
+
+上游字段说明：
+
+- `protocol`：`udp` / `tcp` / `dot` / `doh` / `doq`，默认 `udp`
+- `host`：上游地址（DoH 可作为 bootstrap 地址，兼容别名 `address`）
+- `port`：端口，默认值按协议自动推导：`udp=53`、`tcp=53`、`dot=853`、`doh=443`、`doq=853`
+- `timeout`：超时秒数
+- `ecs`：向上游附加/覆盖的 EDNS Client Subnet（如 `1.2.3.0/24` 或 `2001:db8::/56`，兼容别名 `client_subnet`）
+- `verify`：TLS 证书校验（`true`/`false` 或证书路径）
+- `hostname`：TLS SNI 主机名（主要用于 DoT/DoQ，也可用于 DoH 兜底，兼容别名 `sni`）
+- `http_host`：DoH 请求使用的 HTTP Host
+- `path`：DoH 请求路径，默认 `/dns-query`
 
 使用自定义配置文件：
 

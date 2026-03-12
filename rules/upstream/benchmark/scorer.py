@@ -5,8 +5,8 @@ from dataclasses import dataclass
 from typing import Iterable
 
 from logger import get_logger
-from selector.benchmark.ping import ping_once
-from selector.benchmark.tcping import tcp_ping_once
+from rules.upstream.benchmark.ping import ping_once
+from rules.upstream.benchmark.tcping import tcp_ping_once
 
 logger = get_logger(__name__)
 

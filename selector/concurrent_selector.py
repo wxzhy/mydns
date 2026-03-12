@@ -8,7 +8,7 @@ from typing import Sequence
 import dns.message
 
 from core.context import QueryContext
-from resolvers.resolver import Resolver
+from resolvers.resolver import ResolverProtocol
 
 
 @dataclass(slots=True)
@@ -16,7 +16,7 @@ class ResolverRaceResult:
     """并发竞速结果。"""
 
     response: dns.message.Message
-    winner: Resolver
+    winner: ResolverProtocol
     elapsed_ms: float
     errors: tuple[str, ...]
 
@@ -25,7 +25,7 @@ class ResolverRaceResult:
 class ResolverBatchSuccess:
     """单个上游成功结果。"""
 
-    resolver: Resolver
+    resolver: ResolverProtocol
     response: dns.message.Message
     elapsed_ms: float
 
@@ -39,7 +39,7 @@ class ResolverBatchResult:
 
 
 async def resolve_fastest(
-    resolvers: Sequence[Resolver],
+    resolvers: Sequence[ResolverProtocol],
     context: QueryContext,
     query: dns.message.Message,
 ) -> ResolverRaceResult:
@@ -48,7 +48,7 @@ async def resolve_fastest(
         raise ValueError("Resolver 列表不能为空。")
 
     started_at = monotonic()
-    tasks: dict[asyncio.Task[dns.message.Message], Resolver] = {
+    tasks: dict[asyncio.Task[dns.message.Message], ResolverProtocol] = {
         asyncio.create_task(resolver.resolve(context, query)): resolver
         for resolver in resolvers
     }
@@ -91,7 +91,7 @@ async def resolve_fastest(
 
 
 async def resolve_all(
-    resolvers: Sequence[Resolver],
+    resolvers: Sequence[ResolverProtocol],
     context: QueryContext,
     query: dns.message.Message,
 ) -> ResolverBatchResult:
@@ -100,8 +100,8 @@ async def resolve_all(
         raise ValueError("Resolver 列表不能为空。")
 
     async def _call_one(
-        resolver: Resolver,
-    ) -> tuple[Resolver, dns.message.Message | None, float, Exception | None]:
+        resolver: ResolverProtocol,
+    ) -> tuple[ResolverProtocol, dns.message.Message | None, float, Exception | None]:
         started_at = monotonic()
         try:
             response = await resolver.resolve(context, query)

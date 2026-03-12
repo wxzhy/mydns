@@ -8,10 +8,10 @@ from core.hooks import RequestHooks
 from resolvers.resolver import BaseUpstreamResolver
 
 
-class UdpUpstreamResolver(BaseUpstreamResolver):
-    """单个上游 UDP Resolver。"""
+class DoqUpstreamResolver(BaseUpstreamResolver):
+    """DNS-over-QUIC 上游 resolver。"""
 
-    protocol = "udp"
+    protocol = "doq"
 
     def __init__(
         self,
@@ -21,10 +21,12 @@ class UdpUpstreamResolver(BaseUpstreamResolver):
         super().__init__(upstream=upstream, hooks=hooks)
 
     async def _perform_query(self, query: dns.message.Message) -> dns.message.Message:
-        return await dns.asyncquery.udp(
+        return await dns.asyncquery.quic(
             q=query,
             where=self._upstream.host,
             port=self._upstream.port,
             timeout=self._upstream.timeout,
-            ignore_unexpected=True,
+            verify=self._upstream.verify,
+            hostname=self._upstream.hostname,
+            server_hostname=self._upstream.hostname,
         )
