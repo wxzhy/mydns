@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from time import monotonic
 from typing import Any
+
+import dns.message
+from time import monotonic
 
 ClientAddress = tuple[str, int]
 
@@ -11,10 +13,16 @@ ClientAddress = tuple[str, int]
 class QueryContext:
     client: ClientAddress
     received_at: float = field(default_factory=monotonic)
+    # 解析后的 DNS Query 对象，便于后续调试和观测。
+    raw_query: dns.message.Message | None = None
     query_name: str | None = None
     query_type: str | None = None
     txid: int | None = None
     ecs: str | None = None
+    selected_resolver: str | None = None
+    resolve_rtt_ms: float | None = None
+    resolver_attempts: int = 0
+    resolver_errors: list[str] = field(default_factory=list)
     tags: dict[str, Any] = field(default_factory=dict)
 
     @property

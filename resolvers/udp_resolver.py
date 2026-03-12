@@ -1,64 +1,64 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from time import monotonic
 
 import dns.asyncquery
 import dns.message
-import dns.rcode
 
 from config import UpstreamConfig
 from core.context import QueryContext
 from logger import get_logger
 from resolvers.resolver import Resolver
+from utils.dns_result import summarize_dns_result
 
 logger = get_logger(__name__)
 
 
 class UdpUpstreamResolver(Resolver):
-    def __init__(self, upstreams: Iterable[UpstreamConfig]) -> None:
-        self._upstreams = tuple(upstreams)
-        if not self._upstreams:
-            raise ValueError("UdpUpstreamResolver requires at least one upstream.")
+    """单个上游 UDP Resolver。"""
+
+    def __init__(self, upstream: UpstreamConfig) -> None:
+        super().__init__(name=f"{upstream.host}:{upstream.port}")
+        self._upstream = upstream
 
     async def resolve(
         self,
         context: QueryContext,
         query: dns.message.Message,
     ) -> dns.message.Message:
-        last_error: Exception | None = None
-
-        for upstream in self._upstreams:
-            try:
-                response = await dns.asyncquery.udp(
-                    q=query,
-                    where=upstream.host,
-                    port=upstream.port,
-                    timeout=upstream.timeout,
-                    ignore_unexpected=True,
-                )
-                return response
-            except Exception as exc:  # pragma: no cover
-                last_error = exc
-                logger.warning(
-                    "Upstream failed host=%s port=%s txid=%s qname=%s qtype=%s ecs=%s error=%s",
-                    upstream.host,
-                    upstream.port,
-                    context.txid if context.txid is not None else "-",
-                    context.query_name or "-",
-                    context.query_type or "-",
-                    context.ecs or "-",
-                    exc,
-                )
-
-        if last_error:
-            logger.error(
-                "All upstream DNS servers failed txid=%s qname=%s qtype=%s ecs=%s",
+        started_at = monotonic()
+        try:
+            response = await dns.asyncquery.udp(
+                q=query,
+                where=self._upstream.host,
+                port=self._upstream.port,
+                timeout=self._upstream.timeout,
+                ignore_unexpected=True,
+            )
+        except Exception as exc:  # pragma: no cover
+            self.mark_failure()
+            elapsed_ms = (monotonic() - started_at) * 1000
+            logger.warning(
+                "上游解析失败 resolver=%s rtt=%.2fms txid=%s qname=%s qtype=%s ecs=%s error=%s",
+                self.name,
+                elapsed_ms,
                 context.txid if context.txid is not None else "-",
                 context.query_name or "-",
                 context.query_type or "-",
                 context.ecs or "-",
+                exc,
             )
+            raise
 
-        fallback = dns.message.make_response(query)
-        fallback.set_rcode(dns.rcode.SERVFAIL)
-        return fallback
+        elapsed_ms = (monotonic() - started_at) * 1000
+        self.mark_success(elapsed_ms)
+        logger.debug(
+            "上游返回 resolver=%s rtt=%.2fms txid=%s qname=%s qtype=%s result=%s",
+            self.name,
+            elapsed_ms,
+            context.txid if context.txid is not None else "-",
+            context.query_name or "-",
+            context.query_type or "-",
+            summarize_dns_result(response),
+        )
+        return response
