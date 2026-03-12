@@ -3,15 +3,15 @@ from __future__ import annotations
 from config import AppConfig
 from core.hooks import RequestHooks
 from core.pipeline import RequestPipeline
-from rules.request import build_default_request_hooks
+from rules import build_default_hooks
 from selector.resolver_manager import ResolverManager
 from servers.udp_server import UdpDnsServer
 
 
 class Application:
     def __init__(self, config: AppConfig) -> None:
-        resolver = ResolverManager.from_upstreams(config.upstreams)
-        hooks = RequestHooks(build_default_request_hooks())
+        hooks = RequestHooks(build_default_hooks())
+        resolver = ResolverManager.from_upstreams(config.upstreams, hooks=hooks)
         pipeline = RequestPipeline(resolver, hooks=hooks)
         self.config = config
         self.server = UdpDnsServer(

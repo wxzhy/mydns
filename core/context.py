@@ -15,6 +15,8 @@ class QueryContext:
     received_at: float = field(default_factory=monotonic)
     # 解析后的 DNS Query 对象，便于后续调试和观测。
     raw_query: dns.message.Message | None = None
+    # 最终返回给客户端的 DNS 响应对象。
+    raw_response: dns.message.Message | None = None
     query_name: str | None = None
     query_type: str | None = None
     txid: int | None = None

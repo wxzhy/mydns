@@ -8,6 +8,7 @@ import dns.rcode
 
 from config import UpstreamConfig
 from core.context import QueryContext
+from core.hooks import RequestHooks
 from logger import get_logger
 from resolvers.resolver import Resolver
 from resolvers.udp_resolver import UdpUpstreamResolver
@@ -26,9 +27,13 @@ class ResolverManager(Resolver):
             raise ValueError("ResolverManager 至少需要一个 resolver。")
 
     @classmethod
-    def from_upstreams(cls, upstreams: Iterable[UpstreamConfig]) -> "ResolverManager":
+    def from_upstreams(
+        cls,
+        upstreams: Iterable[UpstreamConfig],
+        hooks: RequestHooks | None = None,
+    ) -> "ResolverManager":
         """根据上游配置批量创建 resolver。"""
-        resolvers = [UdpUpstreamResolver(upstream) for upstream in upstreams]
+        resolvers = [UdpUpstreamResolver(upstream, hooks=hooks) for upstream in upstreams]
         return cls(resolvers)
 
     @property

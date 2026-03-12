@@ -11,9 +11,11 @@ import dns.rrset
 
 from core.context import QueryContext
 from core.hooks import RequestHook
+from logger import get_logger
 
 DEFAULT_BLOCKED_DOMAINS: tuple[str, ...] = ()
 DEFAULT_HOSTS: dict[str, str] = {}
+logger = get_logger(__name__)
 
 
 def _normalize_domain(name: str) -> str:
@@ -44,7 +46,7 @@ class DomainBlockHook(RequestHook):
         self._suffixes = tuple(suffixes)
         self._rcode = rcode
 
-    def before_upstream(
+    async def before_upstream(
         self,
         context: QueryContext,
         query: dns.message.Message,
@@ -64,6 +66,26 @@ class DomainBlockHook(RequestHook):
         return None
 
 
+class RequestDebugHook(RequestHook):
+    """请求阶段调试日志。"""
+
+    async def before_upstream(
+        self,
+        context: QueryContext,
+        query: dns.message.Message,
+    ) -> dns.message.Message | None:
+        logger.debug(
+            "收到请求 client=%s:%s txid=%s qtype=%s domain=%s ecs=%s",
+            context.client_host,
+            context.client_port,
+            context.txid if context.txid is not None else "-",
+            context.query_type or "-",
+            context.query_name or "-",
+            context.ecs or "-",
+        )
+        return None
+
+
 class HostsHook(RequestHook):
     def __init__(self, hosts: Mapping[str, str], ttl: int = 60) -> None:
         self._ttl = ttl
@@ -80,7 +102,7 @@ class HostsHook(RequestHook):
             else:
                 self._records_v6.setdefault(normalized, []).append(str(parsed))
 
-    def before_upstream(
+    async def before_upstream(
         self,
         context: QueryContext,
         query: dns.message.Message,
@@ -139,11 +161,14 @@ class HostsHook(RequestHook):
 def build_request_hooks(
     blocked_domains: Iterable[str] | None = None,
     hosts: Mapping[str, str] | None = None,
+    enable_debug: bool = True,
 ) -> tuple[RequestHook, ...]:
     hooks: list[RequestHook] = []
     blocked = tuple(blocked_domains or ())
     hosts_map = dict(hosts or {})
 
+    if enable_debug:
+        hooks.append(RequestDebugHook())
     if blocked:
         hooks.append(DomainBlockHook(blocked_domains=blocked))
     if hosts_map:
@@ -157,3 +182,11 @@ def build_default_request_hooks() -> tuple[RequestHook, ...]:
         hosts=DEFAULT_HOSTS,
     )
 
+
+__all__ = [
+    "DomainBlockHook",
+    "HostsHook",
+    "RequestDebugHook",
+    "build_request_hooks",
+    "build_default_request_hooks",
+]
