@@ -11,6 +11,7 @@ import dns.rdataclass
 import dns.rdatatype
 import dns.rcode
 import dns.resolver
+import dns.rrset
 
 CacheKey = tuple[
     dns.name.Name,
@@ -121,16 +122,20 @@ class DnsLruCache(dns.resolver.LRUCache):
 
     @staticmethod
     def _extract_min_ttl(response: dns.message.Message) -> int | None:
-        ttl_values: list[int] = []
-        for rrset in [*response.answer, *response.authority, *response.additional]:
-            # OPT 记录的 ttl 字段并非缓存 TTL。
-            if rrset.rdtype == dns.rdatatype.OPT:
-                continue
-            ttl_values.append(max(0, int(rrset.ttl)))
+        # 优先使用 Answer 区 TTL，避免 Authority/Additional 的 0 TTL 误伤正向缓存。
+        answer_ttl = DnsLruCache._min_ttl_from_rrsets(response.answer)
+        if answer_ttl is not None:
+            return answer_ttl
 
-        if not ttl_values:
-            return None
-        return min(ttl_values)
+        # 负缓存优先按 SOA 规则计算（RFC 2308）：min(SOA RR TTL, SOA.MINIMUM)。
+        negative_ttl = DnsLruCache._extract_negative_ttl(response)
+        if negative_ttl is not None:
+            return negative_ttl
+
+        # 兜底：仅在无 Answer/无 SOA 时，才考虑 Authority/Additional。
+        return DnsLruCache._min_ttl_from_rrsets(
+            [*response.authority, *response.additional]
+        )
 
     @staticmethod
     def _is_cacheable(response: dns.message.Message) -> bool:
@@ -140,6 +145,37 @@ class DnsLruCache(dns.resolver.LRUCache):
         if response.flags & dns.flags.TC:
             return False
         return True
+
+    @staticmethod
+    def _min_ttl_from_rrsets(
+        rrsets: list[dns.rrset.RRset] | tuple[dns.rrset.RRset, ...],
+    ) -> int | None:
+        ttl_values: list[int] = []
+        for rrset in rrsets:
+            # OPT 记录的 ttl 字段并非缓存 TTL。
+            if rrset.rdtype == dns.rdatatype.OPT:
+                continue
+            ttl_values.append(max(0, int(rrset.ttl)))
+        if not ttl_values:
+            return None
+        return min(ttl_values)
+
+    @staticmethod
+    def _extract_negative_ttl(response: dns.message.Message) -> int | None:
+        candidates: list[int] = []
+        for rrset in response.authority:
+            if rrset.rdtype != dns.rdatatype.SOA:
+                continue
+            rrset_ttl = max(0, int(rrset.ttl))
+            if not rrset:
+                candidates.append(rrset_ttl)
+                continue
+            for rdata in rrset:
+                minimum = max(0, int(getattr(rdata, "minimum", rrset_ttl)))
+                candidates.append(min(rrset_ttl, minimum))
+        if not candidates:
+            return None
+        return min(candidates)
 
     @staticmethod
     def _clone_cached_response(cached_answer: dns.resolver.Answer) -> dns.message.Message:

@@ -5,7 +5,7 @@ import dns.message
 from core.context import QueryContext
 from core.hooks import UpstreamHook
 from logger import get_logger
-from rules.upstream.ip_benchmark import FastestIpUpstreamHook
+from rules.upstream.ip_benchmark import IpBenchmarkUpstreamHook
 from utils.dns_result import summarize_dns_result
 
 logger = get_logger(__name__)
@@ -36,7 +36,7 @@ def build_upstream_hooks(enable_debug: bool = True) -> tuple[UpstreamHook, ...]:
     hooks: list[UpstreamHook] = []
     if enable_debug:
         hooks.append(UpstreamDebugHook())
-    hooks.append(FastestIpUpstreamHook())
+    hooks.append(IpBenchmarkUpstreamHook())
     return tuple(hooks)
 
 
@@ -45,7 +45,7 @@ def build_default_upstream_hooks() -> tuple[UpstreamHook, ...]:
 
 
 __all__ = [
-    "FastestIpUpstreamHook",
+    "IpBenchmarkUpstreamHook",
     "UpstreamDebugHook",
     "build_upstream_hooks",
     "build_default_upstream_hooks",

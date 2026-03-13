@@ -27,6 +27,10 @@ class QueryContext:
     resolver_errors: list[str] = field(default_factory=list)
     selected_ip: str | None = None
     selected_ip_rtt_ms: float | None = None
+    # 当前请求下收集到的全部候选 IP（去重）。
+    candidate_ips: set[str] = field(default_factory=set)
+    # IP 测速结果（毫秒）；None 表示测速失败或不可达。
+    ip_benchmark_results: dict[str, float | None] = field(default_factory=dict)
     tags: dict[str, Any] = field(default_factory=dict)
 
     @property

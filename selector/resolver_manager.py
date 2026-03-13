@@ -17,6 +17,7 @@ from resolvers.dot_resolver import DotUpstreamResolver
 from resolvers.resolver import BaseUpstreamResolver, ResolverProtocol
 from resolvers.tcp_resolver import TcpUpstreamResolver
 from resolvers.udp_resolver import UdpUpstreamResolver
+from selector.benchmark_selector import resolve_with_ip_benchmark
 from selector.concurrent_selector import resolve_fastest
 
 logger = get_logger(__name__)
@@ -84,8 +85,16 @@ class ResolverManager:
         query: dns.message.Message,
     ) -> dns.message.Message:
         started_at = monotonic()
-        context.tags["enable_ip_benchmark"] = _should_enable_ip_benchmark(query)
+        enable_ip_benchmark = _should_enable_ip_benchmark(query)
+        context.tags["enable_ip_benchmark"] = enable_ip_benchmark
         context.resolver_attempts = len(self._resolvers)
+
+        if enable_ip_benchmark:
+            return await self._resolve_with_benchmark(
+                context=context,
+                query=query,
+                started_at=started_at,
+            )
 
         if len(self._resolvers) == 1:
             return await self._resolve_single(
@@ -99,6 +108,59 @@ class ResolverManager:
             query=query,
             started_at=started_at,
         )
+
+    async def _resolve_with_benchmark(
+        self,
+        context: QueryContext,
+        query: dns.message.Message,
+        started_at: float,
+    ) -> dns.message.Message:
+        try:
+            benchmark_result = await resolve_with_ip_benchmark(
+                resolvers=self._resolvers,
+                context=context,
+                query=query,
+            )
+        except Exception as exc:  # pragma: no cover
+            context.resolve_rtt_ms = (monotonic() - started_at) * 1000
+            context.resolver_errors = [str(exc)]
+            context.selected_ip = None
+            context.selected_ip_rtt_ms = None
+            logger.error(
+                "并发解析/测速失败 txid=%s qname=%s qtype=%s error=%s",
+                context.txid if context.txid is not None else "-",
+                context.query_name or "-",
+                context.query_type or "-",
+                exc,
+            )
+            return self._make_servfail(query)
+
+        context.selected_resolver = benchmark_result.winner.name
+        context.resolve_rtt_ms = benchmark_result.elapsed_ms
+        context.resolver_errors = list(benchmark_result.errors)
+        context.selected_ip = benchmark_result.selected_ip
+        context.selected_ip_rtt_ms = benchmark_result.selected_ip_rtt_ms
+        context.tags["resolver_winner"] = benchmark_result.winner.name
+        if benchmark_result.errors:
+            context.tags["resolver_failures"] = list(benchmark_result.errors)
+        if benchmark_result.selected_ip is not None:
+            context.tags["selected_ip_source_resolver"] = benchmark_result.winner.name
+
+        logger.info(
+            "并发解析+测速完成 winner=%s rtt=%.2fms txid=%s qname=%s qtype=%s selected_ip=%s selected_ip_rtt=%s",
+            benchmark_result.winner.name,
+            benchmark_result.elapsed_ms,
+            context.txid if context.txid is not None else "-",
+            context.query_name or "-",
+            context.query_type or "-",
+            benchmark_result.selected_ip or "-",
+            (
+                f"{benchmark_result.selected_ip_rtt_ms:.2f}ms"
+                if benchmark_result.selected_ip_rtt_ms is not None
+                else "-"
+            ),
+        )
+        return benchmark_result.response
 
     async def _resolve_single(
         self,
