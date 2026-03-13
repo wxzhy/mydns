@@ -4,6 +4,7 @@ from collections.abc import Iterable, Mapping
 from ipaddress import ip_address
 
 import dns.message
+import dns.opcode
 import dns.rcode
 import dns.rdataclass
 import dns.rdatatype
@@ -83,6 +84,33 @@ class RequestDebugHook(RequestHook):
             context.query_name or "-",
             context.ecs or "-",
         )
+        return None
+
+
+class RequestSanityDropHook(RequestHook):
+    """
+    请求基础合法性校验：
+    - 仅允许标准 QUERY opcode
+    - 仅允许 IN qclass
+
+    不满足时直接标记丢弃（不回包）。
+    """
+
+    async def before_upstream(
+        self,
+        context: QueryContext,
+        query: dns.message.Message,
+    ) -> dns.message.Message | None:
+        if query.opcode() != dns.opcode.QUERY:
+            context.tags["drop_request"] = True
+            context.tags["drop_reason"] = "unsupported-opcode"
+            return None
+
+        for question in query.question:
+            if question.rdclass != dns.rdataclass.IN:
+                context.tags["drop_request"] = True
+                context.tags["drop_reason"] = "unsupported-qclass"
+                return None
         return None
 
 
@@ -169,6 +197,7 @@ def build_request_hooks(
 
     if enable_debug:
         hooks.append(RequestDebugHook())
+    hooks.append(RequestSanityDropHook())
     if blocked:
         hooks.append(DomainBlockHook(blocked_domains=blocked))
     if hosts_map:
@@ -186,6 +215,7 @@ def build_default_request_hooks() -> tuple[RequestHook, ...]:
 __all__ = [
     "DomainBlockHook",
     "HostsHook",
+    "RequestSanityDropHook",
     "RequestDebugHook",
     "build_request_hooks",
     "build_default_request_hooks",

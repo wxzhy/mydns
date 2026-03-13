@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-from ipaddress import ip_address
-
 import dns.asyncquery
 import dns.message
+from yarl import URL
 
 from config import UpstreamConfig
 from core.hooks import RequestHooks
@@ -50,10 +49,10 @@ class DohUpstreamResolver(BaseUpstreamResolver):
     @staticmethod
     def _build_doh_url(host: str, port: int, path: str) -> str:
         normalized_path = path if path.startswith("/") else f"/{path}"
-        try:
-            parsed_host = ip_address(host)
-        except ValueError:
-            return f"https://{host}:{port}{normalized_path}"
-        if parsed_host.version == 6:
-            return f"https://[{host}]:{port}{normalized_path}"
-        return f"https://{host}:{port}{normalized_path}"
+        return str(
+            URL.build(
+                scheme="https",
+                host=host,
+                port=port,
+            ).with_path(normalized_path)
+        )

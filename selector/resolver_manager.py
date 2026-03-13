@@ -13,6 +13,7 @@ from core.hooks import RequestHooks
 from logger import get_logger
 from resolvers.doh_resolver import DohUpstreamResolver
 from resolvers.doq_resolver import DoqUpstreamResolver
+from resolvers.dnscrypt_resolver import DnscryptUpstreamResolver
 from resolvers.dot_resolver import DotUpstreamResolver
 from resolvers.resolver import BaseUpstreamResolver, ResolverProtocol
 from resolvers.tcp_resolver import TcpUpstreamResolver
@@ -28,6 +29,7 @@ RESOLVER_BY_PROTOCOL: dict[str, type[BaseUpstreamResolver]] = {
     "dot": DotUpstreamResolver,
     "doh": DohUpstreamResolver,
     "doq": DoqUpstreamResolver,
+    "dnscrypt": DnscryptUpstreamResolver,
 }
 
 

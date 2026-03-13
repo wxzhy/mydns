@@ -1,5 +1,6 @@
 from resolvers.doh_resolver import DohUpstreamResolver
 from resolvers.doq_resolver import DoqUpstreamResolver
+from resolvers.dnscrypt_resolver import DnscryptUpstreamResolver
 from resolvers.dot_resolver import DotUpstreamResolver
 from resolvers.resolver import BaseUpstreamResolver, ResolverProtocol
 from resolvers.tcp_resolver import TcpUpstreamResolver
@@ -13,4 +14,5 @@ __all__ = [
     "DotUpstreamResolver",
     "DohUpstreamResolver",
     "DoqUpstreamResolver",
+    "DnscryptUpstreamResolver",
 ]

@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 
 import dns.message
-import dns.opcode
+import dns.rcode
 import dns.rdatatype
 
 from core.context import QueryContext
@@ -30,6 +30,8 @@ class IpBenchmarkUpstreamHook(UpstreamHook):
         resolver_name: str,
     ) -> dns.message.Message | None:
         if not _is_supported_query(context, query):
+            return None
+        if response.rcode() != dns.rcode.NOERROR:
             return None
 
         response_ips = _extract_response_ips(response)
@@ -104,24 +106,10 @@ def _is_supported_query(
     if context.tags.get("enable_ip_benchmark") is False:
         return False
 
-    context_qtype = (context.query_type or "").strip().upper()
-    if context_qtype and context_qtype not in ("A", "AAAA"):
-        return False
-
-    if query.opcode() != dns.opcode.QUERY:
-        return False
-    if len(query.question) != 1:
-        return False
-
-    rdtype = query.question[0].rdtype
-    if rdtype not in (dns.rdatatype.A, dns.rdatatype.AAAA):
-        return False
-
-    if context_qtype:
-        query_qtype = dns.rdatatype.to_text(rdtype).upper()
-        if query_qtype != context_qtype:
-            return False
-    return True
+    qtype = (context.query_type or "").strip().upper()
+    if not qtype and query.question:
+        qtype = dns.rdatatype.to_text(query.question[0].rdtype).upper()
+    return qtype in ("A", "AAAA")
 
 
 def _extract_response_ips(response: dns.message.Message) -> tuple[str, ...]:

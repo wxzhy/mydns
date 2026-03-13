@@ -5,7 +5,7 @@
 ## 功能特性
 
 - 异步 UDP DNS 监听
-- 支持多协议上游 DNS 转发：`udp` / `tcp` / `dot` / `doh` / `doq`
+- 支持多协议上游 DNS 转发：`udp` / `tcp` / `dot` / `doh` / `doq` / `dnscrypt`
 - 并发请求上游并返回最快成功响应
 - 内置基于 TTL 的 LRU DNS 缓存（请求前命中、完成后回写）
 - 三阶段 Hook 流水线：
@@ -28,6 +28,8 @@
 - `resolvers/dot_resolver.py`：DoT 上游解析实现
 - `resolvers/doh_resolver.py`：DoH 上游解析实现
 - `resolvers/doq_resolver.py`：DoQ 上游解析实现
+- `resolvers/dnscrypt_resolver.py`：DNSCrypt 上游解析实现
+- `resolvers/dnscrypt`：DNSCrypt 异步客户端与 stamp 解析
 - `selector/resolver_manager.py`：上游 Resolver 初始化与并发选择管理
 - `rules/request`：请求阶段规则（域名拦截 / hosts / 请求日志）
 - `rules/upstream`：上游阶段规则（上游日志 / A/AAAA IP 测速与响应改写）
@@ -89,19 +91,25 @@ upstreams:
     verify: true
     hostname: cloudflare-dns.com
     timeout: 2.0
+  - protocol: dnscrypt
+    stamp: sdns://AQYAAAAAAAAACzEyNy4wLjAuMTo0NDMiMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWYwMTIzNDU2Nzg5YWJjZGVmASMyLmRuc2NyeXB0LWNlcnQuZXhhbXBsZS50ZXN0
+    timeout: 2.0
 ```
 
 上游字段说明：
 
-- `protocol`：`udp` / `tcp` / `dot` / `doh` / `doq`，默认 `udp`
+- `protocol`：`udp` / `tcp` / `dot` / `doh` / `doq` / `dnscrypt`，默认 `udp`
 - `host`：上游地址（DoH 可作为 bootstrap 地址，兼容别名 `address`）
-- `port`：端口，默认值按协议自动推导：`udp=53`、`tcp=53`、`dot=853`、`doh=443`、`doq=853`
+- `port`：端口，默认值按协议自动推导：`udp=53`、`tcp=53`、`dot=853`、`doh=443`、`doq=853`、`dnscrypt=443`
 - `timeout`：超时秒数
 - `ecs`：向上游附加/覆盖的 EDNS Client Subnet（如 `1.2.3.0/24` 或 `2001:db8::/56`，兼容别名 `client_subnet`）
 - `verify`：TLS 证书校验（`true`/`false` 或证书路径）
 - `hostname`：TLS SNI 主机名（主要用于 DoT/DoQ，也可用于 DoH 兜底，兼容别名 `sni`）
 - `http_host`：DoH 请求使用的 HTTP Host
 - `path`：DoH 请求路径，默认 `/dns-query`
+- `stamp`：DNSCrypt stamp（建议优先配置，支持自动提取地址/端口/provider 信息）
+- `provider_name`：DNSCrypt provider 名称（未使用 `stamp` 时必填）
+- `provider_pk`：DNSCrypt provider 公钥（十六进制，未使用 `stamp` 时必填）
 
 使用自定义配置文件：
 

@@ -40,30 +40,44 @@ class RequestPipeline:
 
         response: dns.message.Message
         response_source: str
-        cached_response = self._get_cached_response(query)
-        if cached_response is not None:
-            response = cached_response
-            response_source = "cache-hit"
-            context.tags["cache"] = "hit"
+
+        try:
+            hook_response = await self._hooks.run_before_upstream(context, query)
+        except Exception:
+            logger.exception(
+                "请求规则处理异常 client=%s:%s",
+                context.client_host,
+                context.client_port,
+            )
+            failure = dns.message.make_response(query)
+            failure.set_rcode(dns.rcode.SERVFAIL)
+            response = failure
+            response_source = "request-hook-error"
         else:
-            context.tags["cache"] = "miss"
-            try:
-                hook_response = await self._hooks.run_before_upstream(context, query)
-            except Exception:
-                logger.exception(
-                    "请求规则处理异常 client=%s:%s",
+            if context.tags.get("drop_request"):
+                logger.debug(
+                    "请求被丢弃 client=%s:%s txid=%s qtype=%s domain=%s reason=%s",
                     context.client_host,
                     context.client_port,
+                    context.txid if context.txid is not None else "-",
+                    context.query_type or "-",
+                    context.query_name or "-",
+                    context.tags.get("drop_reason", "-"),
                 )
-                failure = dns.message.make_response(query)
-                failure.set_rcode(dns.rcode.SERVFAIL)
-                response = failure
-                response_source = "request-hook-error"
+                return None
+
+            if hook_response is not None:
+                response = hook_response
+                response_source = "request-hook-short-circuit"
+                context.tags["cache"] = "skipped"
             else:
-                if hook_response is not None:
-                    response = hook_response
-                    response_source = "request-hook-short-circuit"
+                cached_response = self._get_cached_response(query)
+                if cached_response is not None:
+                    response = cached_response
+                    response_source = "cache-hit"
+                    context.tags["cache"] = "hit"
                 else:
+                    context.tags["cache"] = "miss"
                     try:
                         response = await self._resolver.resolve(context, query)
                         response_source = "resolver"

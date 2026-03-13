@@ -33,6 +33,9 @@ class UpstreamConfig:
     hostname: str | None = None
     http_host: str | None = None
     path: str = "/dns-query"
+    stamp: str | None = None
+    provider_name: str | None = None
+    provider_pk: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,14 +110,23 @@ def _parse_upstreams(raw: Any) -> tuple[UpstreamConfig, ...]:
     for index, item in enumerate(raw):
         if not isinstance(item, Mapping):
             raise ValueError(f"`upstreams[{index}]` must be a mapping.")
-        host = str(item.get("host", item.get("address", ""))).strip()
-        if not host:
-            raise ValueError(f"`upstreams[{index}].host` (or `address`) is required.")
         protocol = str(item.get("protocol", "udp")).strip().lower()
+        raw_stamp = _normalize_optional_text(item.get("stamp"))
+        host = str(item.get("host", item.get("address", ""))).strip()
+        if not host and not (protocol == "dnscrypt" and raw_stamp):
+            raise ValueError(
+                f"`upstreams[{index}].host` (or `address`) is required."
+            )
         default_port = _default_port_for_protocol(protocol)
         raw_hostname = item.get("hostname", item.get("sni"))
         raw_http_host = item.get("http_host", item.get("httpHost"))
         raw_path = item.get("path")
+        raw_provider_name = _normalize_optional_text(
+            item.get("provider_name", item.get("providerName"))
+        )
+        raw_provider_pk = _normalize_optional_text(
+            item.get("provider_pk", item.get("providerPk", item.get("public_key")))
+        )
         raw_ecs = item.get("ecs", item.get("client_subnet"))
         try:
             parsed_ecs = _parse_ecs(raw_ecs)
@@ -141,6 +153,9 @@ def _parse_upstreams(raw: Any) -> tuple[UpstreamConfig, ...]:
                     else None
                 ),
                 path=_normalize_doh_path(raw_path),
+                stamp=raw_stamp,
+                provider_name=raw_provider_name,
+                provider_pk=raw_provider_pk,
             )
         )
 
@@ -195,6 +210,8 @@ def _default_port_for_protocol(protocol: str) -> int:
         return 853
     if protocol == "doh":
         return 443
+    if protocol == "dnscrypt":
+        return 443
     if protocol == "tcp":
         return 53
     return 53
@@ -221,6 +238,15 @@ def _parse_ecs(value: Any) -> str | None:
     return network.with_prefixlen
 
 
+def _normalize_optional_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    return text
+
+
 def _validate_config(config: AppConfig) -> None:
     if not (1 <= config.server.port <= 65535):
         raise ValueError("`server.port` must be in 1..65535.")
@@ -230,10 +256,12 @@ def _validate_config(config: AppConfig) -> None:
         raise ValueError("`cache.max_size` must be greater than 0.")
 
     for upstream in config.upstreams:
-        if upstream.protocol not in {"udp", "tcp", "dot", "doh", "doq"}:
+        if upstream.protocol not in {"udp", "tcp", "dot", "doh", "doq", "dnscrypt"}:
             raise ValueError(
                 f"Unsupported upstream protocol `{upstream.protocol}` for {upstream.host}."
             )
+        if not upstream.host and upstream.protocol != "dnscrypt":
+            raise ValueError(f"Upstream host is required for protocol {upstream.protocol}.")
         if not (1 <= upstream.port <= 65535):
             raise ValueError(
                 f"Invalid upstream port for {upstream.protocol}://{upstream.host}."
@@ -249,3 +277,15 @@ def _validate_config(config: AppConfig) -> None:
                 ) from exc
         if upstream.protocol == "doh" and not upstream.path.startswith("/"):
             raise ValueError(f"Invalid DoH path for {upstream.host}: {upstream.path}")
+        if upstream.protocol == "dnscrypt":
+            if not upstream.host and not upstream.stamp:
+                raise ValueError(
+                    "dnscrypt upstream requires host when `stamp` is not provided."
+                )
+            if not upstream.stamp and (
+                not upstream.provider_name or not upstream.provider_pk
+            ):
+                raise ValueError(
+                    "dnscrypt upstream requires `stamp` or both "
+                    "`provider_name` and `provider_pk`."
+                )
