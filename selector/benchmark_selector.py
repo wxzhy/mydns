@@ -5,6 +5,7 @@ from time import monotonic
 from typing import Sequence
 
 import dns.message
+import dns.rcode
 import dns.rdataclass
 import dns.rdatatype
 import dns.rrset
@@ -29,6 +30,7 @@ class BenchmarkSelectResult:
     errors: tuple[str, ...]
     selected_ip: str | None
     selected_ip_rtt_ms: float | None
+    selected_ip_source_resolver: str | None
 
 
 @dataclass(slots=True)
@@ -60,33 +62,48 @@ async def resolve_with_ip_benchmark(
         details = "; ".join(batch_result.errors) if batch_result.errors else "-"
         raise RuntimeError(f"所有 Resolver 均解析失败：{details}")
 
+    noerror_successes = tuple(
+        item
+        for item in batch_result.successes
+        if item.response.rcode() == dns.rcode.NOERROR
+    )
+    if not noerror_successes:
+        details = _collect_non_noerror_errors(batch_result.successes, batch_result.errors)
+        raise RuntimeError(f"所有 Resolver 均未返回 NOERROR：{details}")
+
+    base_success = min(noerror_successes, key=lambda item: item.elapsed_ms)
+
     selected_candidate = _pick_best_candidate(
         query=query,
-        successes=batch_result.successes,
+        successes=noerror_successes,
         ip_benchmark_results=context.ip_benchmark_results,
     )
 
     if selected_candidate is None:
-        fallback = min(batch_result.successes, key=lambda item: item.elapsed_ms)
         logger.debug(
-            "benchmark_selector 未命中可用测速结果，回退上游响应 resolver=%s txid=%s qtype=%s domain=%s",
-            fallback.resolver.name,
+            "benchmark_selector 未命中可用测速结果，回退最快NOERROR响应 resolver=%s txid=%s qtype=%s domain=%s",
+            base_success.resolver.name,
             context.txid if context.txid is not None else "-",
             context.query_type or "-",
             context.query_name or "-",
         )
         return BenchmarkSelectResult(
-            response=fallback.response,
-            winner=fallback.resolver,
+            response=dns.message.from_wire(base_success.response.to_wire()),
+            winner=base_success.resolver,
             elapsed_ms=(monotonic() - started_at) * 1000,
             errors=batch_result.errors,
             selected_ip=None,
             selected_ip_rtt_ms=None,
+            selected_ip_source_resolver=None,
         )
 
-    selected_response = _rewrite_response_with_selected_ip(selected_candidate)
+    selected_response = _rewrite_response_with_selected_ip(
+        base_response=base_success.response,
+        candidate=selected_candidate,
+    )
     logger.debug(
-        "benchmark_selector 选中IP resolver=%s txid=%s qtype=%s domain=%s ip=%s rtt=%.2fms",
+        "benchmark_selector 选中IP base=%s ip_source=%s txid=%s qtype=%s domain=%s ip=%s rtt=%.2fms",
+        base_success.resolver.name,
         selected_candidate.success.resolver.name,
         context.txid if context.txid is not None else "-",
         context.query_type or "-",
@@ -96,11 +113,12 @@ async def resolve_with_ip_benchmark(
     )
     return BenchmarkSelectResult(
         response=selected_response,
-        winner=selected_candidate.success.resolver,
+        winner=base_success.resolver,
         elapsed_ms=(monotonic() - started_at) * 1000,
         errors=batch_result.errors,
         selected_ip=selected_candidate.ip,
         selected_ip_rtt_ms=selected_candidate.rtt_ms,
+        selected_ip_source_resolver=selected_candidate.success.resolver.name,
     )
 
 
@@ -154,13 +172,14 @@ def _is_better(
 
 
 def _rewrite_response_with_selected_ip(
+    base_response: dns.message.Message,
     candidate: _IpResponseCandidate,
 ) -> dns.message.Message:
-    rewritten = dns.message.from_wire(candidate.success.response.to_wire())
+    rewritten = dns.message.from_wire(base_response.to_wire())
     filtered_answers = [
         rrset
         for rrset in rewritten.answer
-        if rrset.rdtype not in (dns.rdatatype.A, dns.rdatatype.AAAA)
+        if rrset.rdtype != candidate.rdtype
     ]
     selected_rrset = dns.rrset.from_text(
         candidate.owner,
@@ -172,3 +191,15 @@ def _rewrite_response_with_selected_ip(
     filtered_answers.append(selected_rrset)
     rewritten.answer = filtered_answers
     return rewritten
+
+
+def _collect_non_noerror_errors(
+    successes: tuple[ResolverBatchSuccess, ...],
+    errors: tuple[str, ...],
+) -> str:
+    details = list(errors)
+    for item in successes:
+        details.append(
+            f"{item.resolver.name}: rcode={dns.rcode.to_text(item.response.rcode())}"
+        )
+    return "; ".join(details) if details else "-"

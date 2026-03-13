@@ -146,11 +146,16 @@ class ResolverManager:
         if benchmark_result.errors:
             context.tags["resolver_failures"] = list(benchmark_result.errors)
         if benchmark_result.selected_ip is not None:
-            context.tags["selected_ip_source_resolver"] = benchmark_result.winner.name
+            context.tags["selected_ip_source_resolver"] = (
+                benchmark_result.selected_ip_source_resolver
+                or benchmark_result.winner.name
+            )
 
         logger.info(
-            "并发解析+测速完成 winner=%s rtt=%.2fms txid=%s qname=%s qtype=%s selected_ip=%s selected_ip_rtt=%s",
+            "并发解析+测速完成 winner=%s ip_source=%s rtt=%.2fms txid=%s qname=%s qtype=%s selected_ip=%s selected_ip_rtt=%s",
             benchmark_result.winner.name,
+            benchmark_result.selected_ip_source_resolver
+            or benchmark_result.winner.name,
             benchmark_result.elapsed_ms,
             context.txid if context.txid is not None else "-",
             context.query_name or "-",

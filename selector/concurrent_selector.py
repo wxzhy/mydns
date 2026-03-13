@@ -6,6 +6,7 @@ from time import monotonic
 from typing import Sequence
 
 import dns.message
+import dns.rcode
 
 from core.context import QueryContext
 from resolvers.resolver import ResolverProtocol
@@ -43,7 +44,7 @@ async def resolve_fastest(
     context: QueryContext,
     query: dns.message.Message,
 ) -> ResolverRaceResult:
-    """并发请求所有 resolver，返回首个成功结果。"""
+    """并发请求所有 resolver，返回首个 NOERROR 成功结果。"""
     if not resolvers:
         raise ValueError("Resolver 列表不能为空。")
 
@@ -67,6 +68,11 @@ async def resolve_fastest(
                 except Exception as exc:  # pragma: no cover
                     errors.append(f"{resolver.name}: {exc}")
                     continue
+                if response.rcode() != dns.rcode.NOERROR:
+                    errors.append(
+                        f"{resolver.name}: rcode={dns.rcode.to_text(response.rcode())}"
+                    )
+                    continue
 
                 for pending_task in tasks:
                     pending_task.cancel()
@@ -87,7 +93,7 @@ async def resolve_fastest(
         raise
 
     error_detail = "; ".join(errors) if errors else "无可用错误详情"
-    raise RuntimeError(f"所有 Resolver 均解析失败：{error_detail}")
+    raise RuntimeError(f"所有 Resolver 均未返回 NOERROR：{error_detail}")
 
 
 async def resolve_all(

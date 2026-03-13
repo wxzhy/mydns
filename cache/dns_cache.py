@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from time import time
 from typing import Final
 
@@ -18,20 +17,12 @@ CacheKey = tuple[
     dns.rdatatype.RdataType,
     dns.rdataclass.RdataClass,
 ]
+
 MIN_CACHEABLE_TTL: Final[int] = 1
 
 
-@dataclass(slots=True, frozen=True)
-class CachedAnswerMeta:
-    """缓存元数据，用于 TTL 递减计算。"""
-
-    response_wire: bytes
-    cached_at: float
-    minimum_ttl: int
-
-
 class CachedDnsAnswer(dns.resolver.Answer):
-    """附带缓存元数据的 Answer。"""
+    """缓存条目：保存响应副本与缓存时间，用于 TTL 衰减。"""
 
     def __init__(
         self,
@@ -44,36 +35,34 @@ class CachedDnsAnswer(dns.resolver.Answer):
     ) -> None:
         response = dns.message.from_wire(response_wire)
         super().__init__(qname, rdtype, rdclass, response)
-        self.meta = CachedAnswerMeta(
-            response_wire=response_wire,
-            cached_at=cached_at,
-            minimum_ttl=minimum_ttl,
-        )
-        # 显式使用我们计算出的最小 TTL，避免 Answer 默认 TTL 在某些异常响应中过大。
+        self.response_wire = response_wire
+        self.cached_at = cached_at
+        self.minimum_ttl = minimum_ttl
         self.expiration = cached_at + minimum_ttl
 
 
 class DnsLruCache(dns.resolver.LRUCache):
-    """基于 dnspython LRUCache 的 DNS 响应缓存。"""
+    """
+    基于 dnspython LRUCache 的简化 DNS 缓存：
+    - 仅缓存 NOERROR 且 answer 非空的结果
+    - 仅处理 answer 区，不处理 authority/additional
+    """
 
     def __init__(self, max_size: int = 10000) -> None:
         super().__init__(max_size=max_size)
 
     def get_response(self, query: dns.message.Message) -> dns.message.Message | None:
-        """按 query 的问题段读取缓存，命中后复用当前请求 ID。"""
         key = self._build_key_from_query(query)
         if key is None:
             return None
 
         cached_answer = super().get(key)
-        if cached_answer is None:
-            return None
-        if not isinstance(cached_answer, dns.resolver.Answer):  # pragma: no cover
+        if not isinstance(cached_answer, CachedDnsAnswer):
             return None
 
-        response = self._clone_cached_response(cached_answer)
-        self._refresh_response_ttl(response, cached_answer)
-        response.id = query.id
+        cached_message = dns.message.from_wire(cached_answer.response_wire)
+        self._refresh_answer_ttl(cached_message, cached_answer)
+        response = self._build_response_from_query(query, cached_message)
         return response
 
     def put_response(
@@ -81,7 +70,6 @@ class DnsLruCache(dns.resolver.LRUCache):
         query: dns.message.Message,
         response: dns.message.Message,
     ) -> None:
-        """根据响应 TTL 写入缓存。"""
         if not self._is_cacheable(response):
             return
 
@@ -89,70 +77,51 @@ class DnsLruCache(dns.resolver.LRUCache):
         if key is None:
             return
 
-        min_ttl = self._extract_min_ttl(response)
-        if min_ttl is None or min_ttl < MIN_CACHEABLE_TTL:
+        minimum_ttl = self._extract_min_answer_ttl(response.answer)
+        if minimum_ttl is None or minimum_ttl < MIN_CACHEABLE_TTL:
             return
 
-        # 存储独立副本，避免后续处理链修改影响缓存内容。
-        cloned = dns.message.from_wire(response.to_wire())
-        wire = cloned.to_wire()
+        # 缓存中仅保留与 answer 相关的响应内容。
+        cache_message = self._build_cache_message(query, response)
+        response_wire = cache_message.to_wire()
         cached_at = time()
-        answer = CachedDnsAnswer(
+        cached = CachedDnsAnswer(
             qname=key[0],
             rdtype=key[1],
             rdclass=key[2],
-            response_wire=wire,
+            response_wire=response_wire,
             cached_at=cached_at,
-            minimum_ttl=min_ttl,
+            minimum_ttl=minimum_ttl,
         )
-        # 按 LRUCache 原始签名写入：(key, dns.resolver.Answer)。
-        super().put(key, answer)
+        super().put(key, cached)
 
     @staticmethod
     def _build_key_from_query(query: dns.message.Message) -> CacheKey | None:
         if not query.question:
             return None
         question = query.question[0]
-        normalized_name = question.name.canonicalize()
         return (
-            normalized_name,
+            question.name.canonicalize(),
             question.rdtype,
             question.rdclass,
         )
 
     @staticmethod
-    def _extract_min_ttl(response: dns.message.Message) -> int | None:
-        # 优先使用 Answer 区 TTL，避免 Authority/Additional 的 0 TTL 误伤正向缓存。
-        answer_ttl = DnsLruCache._min_ttl_from_rrsets(response.answer)
-        if answer_ttl is not None:
-            return answer_ttl
-
-        # 负缓存优先按 SOA 规则计算（RFC 2308）：min(SOA RR TTL, SOA.MINIMUM)。
-        negative_ttl = DnsLruCache._extract_negative_ttl(response)
-        if negative_ttl is not None:
-            return negative_ttl
-
-        # 兜底：仅在无 Answer/无 SOA 时，才考虑 Authority/Additional。
-        return DnsLruCache._min_ttl_from_rrsets(
-            [*response.authority, *response.additional]
-        )
-
-    @staticmethod
     def _is_cacheable(response: dns.message.Message) -> bool:
-        rcode = response.rcode()
-        if rcode in (dns.rcode.SERVFAIL, dns.rcode.REFUSED, dns.rcode.FORMERR):
+        if response.rcode() != dns.rcode.NOERROR:
+            return False
+        if not response.answer:
             return False
         if response.flags & dns.flags.TC:
             return False
         return True
 
     @staticmethod
-    def _min_ttl_from_rrsets(
-        rrsets: list[dns.rrset.RRset] | tuple[dns.rrset.RRset, ...],
+    def _extract_min_answer_ttl(
+        answer_rrsets: list[dns.rrset.RRset] | tuple[dns.rrset.RRset, ...],
     ) -> int | None:
         ttl_values: list[int] = []
-        for rrset in rrsets:
-            # OPT 记录的 ttl 字段并非缓存 TTL。
+        for rrset in answer_rrsets:
             if rrset.rdtype == dns.rdatatype.OPT:
                 continue
             ttl_values.append(max(0, int(rrset.ttl)))
@@ -161,53 +130,43 @@ class DnsLruCache(dns.resolver.LRUCache):
         return min(ttl_values)
 
     @staticmethod
-    def _extract_negative_ttl(response: dns.message.Message) -> int | None:
-        candidates: list[int] = []
-        for rrset in response.authority:
-            if rrset.rdtype != dns.rdatatype.SOA:
-                continue
-            rrset_ttl = max(0, int(rrset.ttl))
-            if not rrset:
-                candidates.append(rrset_ttl)
-                continue
-            for rdata in rrset:
-                minimum = max(0, int(getattr(rdata, "minimum", rrset_ttl)))
-                candidates.append(min(rrset_ttl, minimum))
-        if not candidates:
-            return None
-        return min(candidates)
-
-    @staticmethod
-    def _clone_cached_response(cached_answer: dns.resolver.Answer) -> dns.message.Message:
-        if isinstance(cached_answer, CachedDnsAnswer):
-            return dns.message.from_wire(cached_answer.meta.response_wire)
-        return dns.message.from_wire(cached_answer.response.to_wire())
-
-    @staticmethod
-    def _refresh_response_ttl(
+    def _refresh_answer_ttl(
         response: dns.message.Message,
-        cached_answer: dns.resolver.Answer,
+        cached_answer: CachedDnsAnswer,
     ) -> None:
-        now = time()
-        if isinstance(cached_answer, CachedDnsAnswer):
-            age_seconds = max(0.0, now - cached_answer.meta.cached_at)
-        else:
-            minimum_ttl = getattr(
-                getattr(cached_answer, "chaining_result", None),
-                "minimum_ttl",
-                None,
-            )
-            if minimum_ttl is None:
-                age_seconds = 0.0
-            else:
-                created_at = cached_answer.expiration - float(minimum_ttl)
-                age_seconds = max(0.0, now - created_at)
-
-        ttl_decay = int(age_seconds)
+        ttl_decay = int(max(0.0, time() - cached_answer.cached_at))
         if ttl_decay <= 0:
             return
-
-        for rrset in [*response.answer, *response.authority, *response.additional]:
+        for rrset in response.answer:
             if rrset.rdtype == dns.rdatatype.OPT:
                 continue
             rrset.ttl = max(0, int(rrset.ttl) - ttl_decay)
+
+    @staticmethod
+    def _build_cache_message(
+        query: dns.message.Message,
+        upstream_response: dns.message.Message,
+    ) -> dns.message.Message:
+        response = dns.message.make_response(query)
+        response.set_rcode(upstream_response.rcode())
+        # 保留来自上游的关键响应标志位。
+        response.flags = dns.flags.QR | (query.flags & dns.flags.RD)
+        response.flags |= upstream_response.flags & (
+            dns.flags.RA | dns.flags.AA | dns.flags.AD | dns.flags.CD
+        )
+        response.answer = list(upstream_response.answer)
+        return response
+
+    @staticmethod
+    def _build_response_from_query(
+        query: dns.message.Message,
+        cached_message: dns.message.Message,
+    ) -> dns.message.Message:
+        response = dns.message.make_response(query)
+        response.set_rcode(cached_message.rcode())
+        response.flags = dns.flags.QR | (query.flags & dns.flags.RD)
+        response.flags |= cached_message.flags & (
+            dns.flags.RA | dns.flags.AA | dns.flags.AD | dns.flags.CD
+        )
+        response.answer = list(cached_message.answer)
+        return response
