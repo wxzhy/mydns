@@ -21,6 +21,10 @@ class ResolverProtocol(Protocol):
     def name(self) -> str:
         """Resolver 唯一标识名。"""
 
+    @property
+    def tag(self) -> str:
+        """Resolver 所属分组标签。"""
+
     def stats_snapshot(self) -> dict[str, float | int | None]:
         """返回运行时统计快照。"""
 
@@ -54,6 +58,10 @@ class BaseUpstreamResolver(ABC):
     @property
     def name(self) -> str:
         return self._name
+
+    @property
+    def tag(self) -> str:
+        return self._upstream.tag
 
     async def resolve(
         self,

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping, Sequence
 from time import monotonic
 
 import dns.message
@@ -32,15 +32,22 @@ RESOLVER_BY_PROTOCOL: dict[str, type[BaseUpstreamResolver]] = {
     "dnscrypt": DnscryptUpstreamResolver,
 }
 
+DEFAULT_TAG = "default"
+ResolverTable = dict[str, ResolverProtocol]
+ResolverGroupTable = dict[str, ResolverTable]
+
 
 class ResolverManager:
-    """统一管理多个 resolver，并对外提供单一 resolve 入口。"""
+    """统一管理多个 resolver，并按 tag 分组调度。"""
 
-    def __init__(self, resolvers: Iterable[ResolverProtocol]) -> None:
+    def __init__(self, resolver_groups: Mapping[str, Mapping[str, ResolverProtocol]]) -> None:
         self._name = "resolver-manager"
-        self._resolvers = tuple(resolvers)
-        if not self._resolvers:
-            raise ValueError("ResolverManager 至少需要一个 resolver。")
+        self._resolver_groups: ResolverGroupTable = {
+            tag: dict(table) for tag, table in resolver_groups.items()
+        }
+        default_table = self._resolver_groups.get(DEFAULT_TAG, {})
+        if not default_table:
+            raise ValueError("ResolverManager 至少需要一个 default 组 resolver。")
 
     @property
     def name(self) -> str:
@@ -52,20 +59,39 @@ class ResolverManager:
         upstreams: Iterable[UpstreamConfig],
         hooks: RequestHooks | None = None,
     ) -> "ResolverManager":
-        """根据上游配置批量创建 resolver。"""
-        resolvers: list[ResolverProtocol] = []
-        for upstream in upstreams:
+        """根据上游配置批量创建 resolver，并自动加入 default 组。"""
+        groups: ResolverGroupTable = {DEFAULT_TAG: {}}
+
+        for index, upstream in enumerate(upstreams):
             resolver_type = RESOLVER_BY_PROTOCOL.get(upstream.protocol)
             if resolver_type is None:
                 raise ValueError(
                     f"Unsupported upstream protocol `{upstream.protocol}` for {upstream.host}."
                 )
-            resolvers.append(resolver_type(upstream, hooks=hooks))
-        return cls(resolvers)
+
+            resolver = resolver_type(upstream, hooks=hooks)
+            resolver_key = _build_resolver_key(index=index, resolver=resolver)
+
+            # 所有 resolver 一律加入 default 组。
+            _insert_resolver(groups[DEFAULT_TAG], resolver_key, resolver)
+
+            # 除 default 以外，再加入自身 tag 分组。
+            tag = upstream.tag.strip() or DEFAULT_TAG
+            if tag != DEFAULT_TAG:
+                group = groups.setdefault(tag, {})
+                _insert_resolver(group, resolver_key, resolver)
+
+        return cls(groups)
 
     @property
-    def resolvers(self) -> tuple[ResolverProtocol, ...]:
-        return self._resolvers
+    def resolvers(self) -> ResolverTable:
+        """返回 default 组 resolver 表。"""
+        return self._resolver_groups[DEFAULT_TAG]
+
+    @property
+    def resolver_groups(self) -> ResolverGroupTable:
+        """返回全部 resolver 分组表。"""
+        return {tag: dict(table) for tag, table in self._resolver_groups.items()}
 
     def stats_snapshot(self) -> dict[str, float | int | None]:
         return {
@@ -76,10 +102,25 @@ class ResolverManager:
         }
 
     def upstream_stats(self) -> dict[str, dict[str, float | int | None]]:
-        """导出所有上游 resolver 的统计快照。"""
-        return {
-            resolver.name: resolver.stats_snapshot() for resolver in self._resolvers
-        }
+        """导出所有上游 resolver 的统计快照（按唯一名称去重）。"""
+        stats: dict[str, dict[str, float | int | None]] = {}
+        seen_resolver_ids: set[int] = set()
+
+        for table in self._resolver_groups.values():
+            for resolver in table.values():
+                resolver_id = id(resolver)
+                if resolver_id in seen_resolver_ids:
+                    continue
+                seen_resolver_ids.add(resolver_id)
+
+                name = resolver.name
+                if name in stats:
+                    suffix = 2
+                    while f"{name}#{suffix}" in stats:
+                        suffix += 1
+                    name = f"{name}#{suffix}"
+                stats[name] = resolver.stats_snapshot()
+        return stats
 
     async def resolve(
         self,
@@ -87,39 +128,68 @@ class ResolverManager:
         query: dns.message.Message,
     ) -> dns.message.Message:
         started_at = monotonic()
+        requested_tag, selected_tag, resolvers = self._pick_resolvers_by_context(context)
         enable_ip_benchmark = _should_enable_ip_benchmark(query)
         context.tags["enable_ip_benchmark"] = enable_ip_benchmark
-        context.resolver_attempts = len(self._resolvers)
+        context.tags["resolver_group"] = selected_tag
+        if requested_tag != selected_tag:
+            context.tags["resolver_group_requested"] = requested_tag
 
+        context.resolver_attempts = len(resolvers)
         if enable_ip_benchmark:
             return await self._resolve_with_benchmark(
                 context=context,
                 query=query,
                 started_at=started_at,
+                resolvers=resolvers,
             )
 
-        if len(self._resolvers) == 1:
+        if len(resolvers) == 1:
             return await self._resolve_single(
                 context=context,
                 query=query,
                 started_at=started_at,
+                resolver=resolvers[0],
             )
 
         return await self._resolve_fastest(
             context=context,
             query=query,
             started_at=started_at,
+            resolvers=resolvers,
         )
+
+    def _pick_resolvers_by_context(
+        self,
+        context: QueryContext,
+    ) -> tuple[str, str, tuple[ResolverProtocol, ...]]:
+        requested_tag = (context.tag or DEFAULT_TAG).strip() or DEFAULT_TAG
+        selected_tag = requested_tag
+
+        table = self._resolver_groups.get(selected_tag)
+        if not table:
+            selected_tag = DEFAULT_TAG
+            table = self._resolver_groups[DEFAULT_TAG]
+            logger.warning(
+                "resolver 分组不存在，回退 default requested_tag=%s txid=%s qname=%s qtype=%s",
+                requested_tag,
+                context.txid if context.txid is not None else "-",
+                context.query_name or "-",
+                context.query_type or "-",
+            )
+
+        return requested_tag, selected_tag, tuple(table.values())
 
     async def _resolve_with_benchmark(
         self,
         context: QueryContext,
         query: dns.message.Message,
         started_at: float,
+        resolvers: Sequence[ResolverProtocol],
     ) -> dns.message.Message:
         try:
             benchmark_result = await resolve_with_ip_benchmark(
-                resolvers=self._resolvers,
+                resolvers=resolvers,
                 context=context,
                 query=query,
             )
@@ -174,8 +244,8 @@ class ResolverManager:
         context: QueryContext,
         query: dns.message.Message,
         started_at: float,
+        resolver: ResolverProtocol,
     ) -> dns.message.Message:
-        resolver = self._resolvers[0]
         try:
             response = await resolver.resolve(context, query)
         except Exception as exc:  # pragma: no cover
@@ -203,10 +273,11 @@ class ResolverManager:
         context: QueryContext,
         query: dns.message.Message,
         started_at: float,
+        resolvers: Sequence[ResolverProtocol],
     ) -> dns.message.Message:
         try:
             race_result = await resolve_fastest(
-                resolvers=self._resolvers,
+                resolvers=resolvers,
                 context=context,
                 query=query,
             )
@@ -244,6 +315,23 @@ class ResolverManager:
         response = dns.message.make_response(query)
         response.set_rcode(dns.rcode.SERVFAIL)
         return response
+
+
+def _build_resolver_key(index: int, resolver: ResolverProtocol) -> str:
+    return f"upstream-{index + 1}@{resolver.name}"
+
+
+def _insert_resolver(
+    table: ResolverTable,
+    key: str,
+    resolver: ResolverProtocol,
+) -> None:
+    candidate = key
+    suffix = 2
+    while candidate in table:
+        candidate = f"{key}#{suffix}"
+        suffix += 1
+    table[candidate] = resolver
 
 
 def _should_enable_ip_benchmark(query: dns.message.Message) -> bool:

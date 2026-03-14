@@ -21,6 +21,8 @@ class QueryContext:
     query_type: str | None = None
     txid: int | None = None
     ecs: str | None = None
+    # 指定当前请求使用的服务器组，默认走 default。
+    tag: str = "default"
     selected_resolver: str | None = None
     resolve_rtt_ms: float | None = None
     resolver_attempts: int = 0

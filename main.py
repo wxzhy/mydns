@@ -35,7 +35,10 @@ async def run(config_path: str | None) -> None:
 
     logger.info(
         "Forwarding to upstreams: %s",
-        ", ".join(f"{up.host}:{up.port}" for up in config.upstreams),
+        ", ".join(
+            f"[{up.tag}] {up.protocol}://{up.host}:{up.port}"
+            for up in config.upstreams
+        ),
     )
 
     stop_event = asyncio.Event()

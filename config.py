@@ -1,11 +1,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from ipaddress import ip_network
+from ipaddress import ip_address, ip_network
 from pathlib import Path
 from typing import Any, Mapping
 import os
 from collections.abc import Sequence
+from yarl import URL
+
+try:
+    import dnsstamps
+    from dnsstamps import Protocol as StampProtocol
+except Exception:  # pragma: no cover
+    dnsstamps = None
+    StampProtocol = None  # type: ignore[assignment]
 
 try:
     import yaml
@@ -28,6 +36,7 @@ class UpstreamConfig:
     protocol: str = "udp"
     port: int = 53
     timeout: float = 2.0
+    tag: str = "default"
     ecs: str | None = None
     verify: bool | str = True
     hostname: str | None = None
@@ -51,8 +60,20 @@ class CacheConfig:
 
 def _default_upstreams() -> tuple[UpstreamConfig, ...]:
     return (
-        UpstreamConfig(host="223.5.5.5", protocol="udp", port=53, timeout=2.0),
-        UpstreamConfig(host="8.8.8.8", protocol="udp", port=53, timeout=2.0),
+        UpstreamConfig(
+            host="223.5.5.5",
+            protocol="udp",
+            port=53,
+            timeout=2.0,
+            tag="default",
+        ),
+        UpstreamConfig(
+            host="8.8.8.8",
+            protocol="udp",
+            port=53,
+            timeout=2.0,
+            tag="default",
+        ),
     )
 
 
@@ -108,56 +129,7 @@ def _parse_upstreams(raw: Any) -> tuple[UpstreamConfig, ...]:
 
     upstreams: list[UpstreamConfig] = []
     for index, item in enumerate(raw):
-        if not isinstance(item, Mapping):
-            raise ValueError(f"`upstreams[{index}]` must be a mapping.")
-        protocol = str(item.get("protocol", "udp")).strip().lower()
-        raw_stamp = _normalize_optional_text(item.get("stamp"))
-        host = str(item.get("host", item.get("address", ""))).strip()
-        if not host and not (protocol == "dnscrypt" and raw_stamp):
-            raise ValueError(
-                f"`upstreams[{index}].host` (or `address`) is required."
-            )
-        default_port = _default_port_for_protocol(protocol)
-        raw_hostname = item.get("hostname", item.get("sni"))
-        raw_http_host = item.get("http_host", item.get("httpHost"))
-        raw_path = item.get("path")
-        raw_provider_name = _normalize_optional_text(
-            item.get("provider_name", item.get("providerName"))
-        )
-        raw_provider_pk = _normalize_optional_text(
-            item.get("provider_pk", item.get("providerPk", item.get("public_key")))
-        )
-        raw_ecs = item.get("ecs", item.get("client_subnet"))
-        try:
-            parsed_ecs = _parse_ecs(raw_ecs)
-        except ValueError as exc:
-            raise ValueError(
-                f"`upstreams[{index}].ecs` is invalid: {raw_ecs}"
-            ) from exc
-        upstreams.append(
-            UpstreamConfig(
-                host=host,
-                protocol=protocol,
-                port=int(item.get("port", default_port)),
-                timeout=float(item.get("timeout", 2.0)),
-                ecs=parsed_ecs,
-                verify=_parse_verify(item.get("verify", True)),
-                hostname=(
-                    str(raw_hostname).strip()
-                    if raw_hostname is not None and str(raw_hostname).strip()
-                    else None
-                ),
-                http_host=(
-                    str(raw_http_host).strip()
-                    if raw_http_host is not None and str(raw_http_host).strip()
-                    else None
-                ),
-                path=_normalize_doh_path(raw_path),
-                stamp=raw_stamp,
-                provider_name=raw_provider_name,
-                provider_pk=raw_provider_pk,
-            )
-        )
+        upstreams.append(_parse_upstream_item(index=index, item=item))
 
     if not upstreams:
         raise ValueError("At least one upstream DNS server is required.")
@@ -205,14 +177,309 @@ def _parse_verify(value: Any) -> bool | str:
     return bool(value)
 
 
-def _default_port_for_protocol(protocol: str) -> int:
-    if protocol == "dot" or protocol == "doq":
-        return 853
+def _parse_upstream_item(index: int, item: Any) -> UpstreamConfig:
+    if isinstance(item, str):
+        raw_text = item.strip()
+        if not raw_text:
+            raise ValueError(f"`upstreams[{index}]` is empty.")
+        if raw_text.startswith("sdns://") or "://" in raw_text:
+            mapping: Mapping[str, Any] = {"target": raw_text}
+        else:
+            mapping = {"host": raw_text}
+    elif isinstance(item, Mapping):
+        mapping = item
+    else:
+        raise ValueError(
+            f"`upstreams[{index}]` must be a mapping or a string (URL/stamp/host)."
+        )
+
+    return _build_upstream_config(index=index, item=mapping)
+
+
+def _build_upstream_config(index: int, item: Mapping[str, Any]) -> UpstreamConfig:
+    base = _parse_base_upstream(index=index, item=item)
+
+    raw_host = _normalize_optional_text(item.get("host", item.get("address")))
+    if raw_host and (raw_host.startswith("sdns://") or "://" in raw_host):
+        raw_host = None
+    host = raw_host or str(base.get("host", "")).strip()
+    protocol = _normalize_protocol(
+        str(item.get("protocol", base.get("protocol", "udp")))
+    )
+    default_port = _default_port_for_protocol(protocol)
+    port = int(item.get("port", base.get("port", default_port)))
+    timeout = float(item.get("timeout", base.get("timeout", 2.0)))
+    tag = _normalize_tag(item.get("tag", base.get("tag")))
+
+    raw_ecs = item.get("ecs", item.get("client_subnet", base.get("ecs")))
+    try:
+        parsed_ecs = _parse_ecs(raw_ecs)
+    except ValueError as exc:
+        raise ValueError(f"`upstreams[{index}].ecs` is invalid: {raw_ecs}") from exc
+
+    raw_hostname = item.get("hostname", item.get("sni", base.get("hostname")))
+    raw_http_host = item.get(
+        "http_host",
+        item.get("httpHost", base.get("http_host")),
+    )
+    hostname = _normalize_optional_text(raw_hostname)
+    http_host = _normalize_optional_text(raw_http_host)
+
+    if protocol in {"dot", "doq"} and hostname is None and _is_hostname(host):
+        hostname = host
+
     if protocol == "doh":
+        if hostname is None and _is_hostname(host):
+            hostname = host
+        if http_host is None and hostname is not None:
+            http_host = hostname
+    else:
+        http_host = None
+
+    raw_path = item.get("path", base.get("path"))
+    raw_stamp = _normalize_optional_text(item.get("stamp")) or _normalize_optional_text(
+        base.get("stamp")
+    )
+    raw_provider_name = _normalize_optional_text(
+        item.get("provider_name", item.get("providerName", base.get("provider_name")))
+    )
+    raw_provider_pk = _normalize_optional_text(
+        item.get(
+            "provider_pk",
+            item.get("providerPk", item.get("public_key", base.get("provider_pk"))),
+        )
+    )
+
+    if not host:
+        raise ValueError(f"`upstreams[{index}].host` (or `address`) is required.")
+
+    return UpstreamConfig(
+        host=host,
+        protocol=protocol,
+        port=port,
+        timeout=timeout,
+        tag=tag,
+        ecs=parsed_ecs,
+        verify=_parse_verify(item.get("verify", base.get("verify", True))),
+        hostname=hostname,
+        http_host=http_host,
+        path=_normalize_doh_path(raw_path),
+        stamp=raw_stamp,
+        provider_name=raw_provider_name,
+        provider_pk=raw_provider_pk,
+    )
+
+
+def _parse_base_upstream(index: int, item: Mapping[str, Any]) -> dict[str, Any]:
+    raw_stamp = _normalize_optional_text(item.get("stamp"))
+    raw_target = _normalize_optional_text(
+        item.get(
+            "url",
+            item.get(
+                "resolver",
+                item.get(
+                    "upstream",
+                    item.get("target"),
+                ),
+            ),
+        )
+    )
+
+    host_or_address = _normalize_optional_text(item.get("host", item.get("address")))
+    if raw_stamp is None and raw_target is None and host_or_address:
+        if host_or_address.startswith("sdns://") or "://" in host_or_address:
+            raw_target = host_or_address
+
+    if raw_stamp is None and raw_target and raw_target.startswith("sdns://"):
+        raw_stamp = raw_target
+        raw_target = None
+
+    if raw_stamp is not None:
+        return _parse_stamp_to_base(index=index, stamp=raw_stamp)
+    if raw_target is not None:
+        return _parse_url_to_base(index=index, target=raw_target)
+    return {}
+
+
+def _parse_stamp_to_base(index: int, stamp: str) -> dict[str, Any]:
+    if dnsstamps is None or StampProtocol is None:
+        raise RuntimeError(
+            "使用 dnsstamp 配置需要安装依赖 `dnsstamps`。"
+        )
+    try:
+        parameter = dnsstamps.parse(stamp)
+    except Exception as exc:  # pragma: no cover
+        raise ValueError(f"`upstreams[{index}].stamp` parse failed: {exc}") from exc
+
+    protocol = parameter.protocol
+    if protocol == StampProtocol.PLAIN:
+        host, port = _split_host_port(
+            _normalize_optional_text(parameter.address) or "",
+            default_port=_default_port_for_protocol("udp"),
+        )
+        return {
+            "protocol": "udp",
+            "host": host,
+            "port": port,
+            "stamp": stamp,
+        }
+
+    if protocol == StampProtocol.DOT:
+        host, port, hostname = _parse_stamp_endpoint(
+            parameter=parameter,
+            default_port=_default_port_for_protocol("dot"),
+        )
+        return {
+            "protocol": "dot",
+            "host": host,
+            "port": port,
+            "hostname": hostname,
+            "stamp": stamp,
+        }
+
+    if protocol == StampProtocol.DOH:
+        host, port, hostname = _parse_stamp_endpoint(
+            parameter=parameter,
+            default_port=_default_port_for_protocol("doh"),
+        )
+        path = _normalize_doh_path(parameter.path)
+        return {
+            "protocol": "doh",
+            "host": host,
+            "port": port,
+            "hostname": hostname,
+            "http_host": hostname,
+            "path": path,
+            "stamp": stamp,
+        }
+
+    if protocol == StampProtocol.DOQ:
+        host, port, hostname = _parse_stamp_endpoint(
+            parameter=parameter,
+            default_port=_default_port_for_protocol("doq"),
+        )
+        return {
+            "protocol": "doq",
+            "host": host,
+            "port": port,
+            "hostname": hostname,
+            "stamp": stamp,
+        }
+
+    if protocol == StampProtocol.DNSCRYPT:
+        host, port = _split_host_port(
+            _normalize_optional_text(parameter.address) or "",
+            default_port=_default_port_for_protocol("dnscrypt"),
+        )
+        provider_name = _normalize_optional_text(parameter.provider_name)
+        provider_pk = _normalize_optional_text(parameter.public_key)
+        if not host:
+            raise ValueError(
+                f"`upstreams[{index}].stamp` dnscrypt address is empty."
+            )
+        if not provider_name or not provider_pk:
+            raise ValueError(
+                f"`upstreams[{index}].stamp` dnscrypt provider fields are incomplete."
+            )
+        return {
+            "protocol": "dnscrypt",
+            "host": host,
+            "port": port,
+            "provider_name": provider_name,
+            "provider_pk": provider_pk,
+            "stamp": stamp,
+        }
+
+    raise ValueError(
+        f"`upstreams[{index}].stamp` contains unsupported protocol: {protocol}"
+    )
+
+
+def _parse_stamp_endpoint(
+    parameter: Any,
+    default_port: int,
+) -> tuple[str, int, str | None]:
+    host = ""
+    port = default_port
+    address = _normalize_optional_text(parameter.address)
+    if address:
+        host, port = _split_host_port(address, default_port=default_port)
+
+    hostname = _normalize_optional_text(parameter.hostname)
+    bootstrap_ips = _normalize_text_sequence(getattr(parameter, "bootstrap_ips", ()))
+    if not host and bootstrap_ips:
+        host = bootstrap_ips[0]
+    if not host and hostname:
+        host = hostname
+    return host, port, hostname
+
+
+def _parse_url_to_base(index: int, target: str) -> dict[str, Any]:
+    try:
+        parsed = URL(target)
+    except Exception as exc:  # pragma: no cover
+        raise ValueError(f"`upstreams[{index}]` URL parse failed: {exc}") from exc
+
+    scheme = _normalize_optional_text(parsed.scheme)
+    protocol = _protocol_from_scheme(scheme or "")
+    if protocol is None:
+        raise ValueError(
+            f"`upstreams[{index}]` URL scheme `{scheme}` is not supported."
+        )
+
+    host = _normalize_optional_text(parsed.host)
+    if host is None:
+        raise ValueError(f"`upstreams[{index}]` URL must include host: {target}")
+
+    port = parsed.port or _default_port_for_protocol(protocol)
+    base: dict[str, Any] = {
+        "protocol": protocol,
+        "host": host,
+        "port": port,
+    }
+
+    if protocol in {"dot", "doq"} and _is_hostname(host):
+        base["hostname"] = host
+    if protocol == "doh":
+        doh_path = parsed.path_qs if parsed.path_qs else parsed.path
+        base["path"] = _normalize_doh_path(doh_path)
+        if _is_hostname(host):
+            base["hostname"] = host
+            base["http_host"] = host
+
+    return base
+
+
+def _normalize_protocol(protocol: str) -> str:
+    normalized = protocol.strip().lower()
+    aliases = {
+        "tls": "dot",
+        "https": "doh",
+        "quic": "doq",
+    }
+    return aliases.get(normalized, normalized)
+
+
+def _protocol_from_scheme(scheme: str) -> str | None:
+    mapping = {
+        "udp": "udp",
+        "tcp": "tcp",
+        "tls": "dot",
+        "https": "doh",
+        "quic": "doq",
+    }
+    return mapping.get(scheme.strip().lower())
+
+
+def _default_port_for_protocol(protocol: str) -> int:
+    normalized = _normalize_protocol(protocol)
+    if normalized == "dot" or normalized == "doq":
+        return 853
+    if normalized == "doh":
         return 443
-    if protocol == "dnscrypt":
+    if normalized == "dnscrypt":
         return 443
-    if protocol == "tcp":
+    if normalized == "tcp":
         return 53
     return 53
 
@@ -228,6 +495,40 @@ def _normalize_doh_path(raw_path: Any) -> str:
     return f"/{path}"
 
 
+def _split_host_port(address: str, *, default_port: int) -> tuple[str, int]:
+    text = address.strip()
+    if not text:
+        return "", default_port
+
+    if text.startswith("["):
+        right = text.find("]")
+        if right <= 1:
+            raise ValueError(f"Invalid IPv6 address: {address}")
+        host = text[1:right]
+        rest = text[right + 1 :]
+        if not rest:
+            return host, default_port
+        if not rest.startswith(":"):
+            raise ValueError(f"Invalid address format: {address}")
+        return host, _parse_port(rest[1:], default_port=default_port)
+
+    if text.count(":") == 1:
+        host_part, port_part = text.rsplit(":", 1)
+        if port_part.isdigit():
+            return host_part.strip(), _parse_port(port_part, default_port=default_port)
+
+    return text, default_port
+
+
+def _parse_port(value: str, *, default_port: int) -> int:
+    if not value:
+        return default_port
+    port = int(value)
+    if not (1 <= port <= 65535):
+        raise ValueError(f"Invalid port: {port}")
+    return port
+
+
 def _parse_ecs(value: Any) -> str | None:
     if value is None:
         return None
@@ -241,10 +542,40 @@ def _parse_ecs(value: Any) -> str | None:
 def _normalize_optional_text(value: Any) -> str | None:
     if value is None:
         return None
-    text = str(value).strip()
+    if isinstance(value, bytes):
+        try:
+            text = value.decode("utf-8", errors="strict").strip()
+        except UnicodeDecodeError:
+            text = value.hex()
+    else:
+        text = str(value).strip()
     if not text:
         return None
     return text
+
+
+def _normalize_tag(value: Any) -> str:
+    tag = _normalize_optional_text(value)
+    return tag or "default"
+
+
+def _normalize_text_sequence(values: Any) -> tuple[str, ...]:
+    if not isinstance(values, Sequence) or isinstance(values, (str, bytes)):
+        return ()
+    results: list[str] = []
+    for value in values:
+        text = _normalize_optional_text(value)
+        if text is not None:
+            results.append(text)
+    return tuple(results)
+
+
+def _is_hostname(host: str) -> bool:
+    try:
+        ip_address(host)
+    except ValueError:
+        return True
+    return False
 
 
 def _validate_config(config: AppConfig) -> None:
@@ -260,7 +591,7 @@ def _validate_config(config: AppConfig) -> None:
             raise ValueError(
                 f"Unsupported upstream protocol `{upstream.protocol}` for {upstream.host}."
             )
-        if not upstream.host and upstream.protocol != "dnscrypt":
+        if not upstream.host:
             raise ValueError(f"Upstream host is required for protocol {upstream.protocol}.")
         if not (1 <= upstream.port <= 65535):
             raise ValueError(
@@ -277,15 +608,13 @@ def _validate_config(config: AppConfig) -> None:
                 ) from exc
         if upstream.protocol == "doh" and not upstream.path.startswith("/"):
             raise ValueError(f"Invalid DoH path for {upstream.host}: {upstream.path}")
+        if not upstream.tag.strip():
+            raise ValueError(
+                f"Invalid upstream tag for {upstream.protocol}://{upstream.host}."
+            )
         if upstream.protocol == "dnscrypt":
-            if not upstream.host and not upstream.stamp:
+            if not upstream.provider_name or not upstream.provider_pk:
                 raise ValueError(
-                    "dnscrypt upstream requires host when `stamp` is not provided."
-                )
-            if not upstream.stamp and (
-                not upstream.provider_name or not upstream.provider_pk
-            ):
-                raise ValueError(
-                    "dnscrypt upstream requires `stamp` or both "
-                    "`provider_name` and `provider_pk`."
+                    "dnscrypt upstream requires parsed `provider_name` and "
+                    "`provider_pk` in final config."
                 )

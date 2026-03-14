@@ -1,0 +1,132 @@
+# mydns 配置示例（完整字段一览）
+# 复制为 config.yaml 后按需修改
+
+server:
+  # 监听地址
+  host: 0.0.0.0
+  # 监听端口
+  port: 5335
+  # UDP 最大报文大小
+  max_packet_size: 4096
+
+logging:
+  # 日志级别：DEBUG / INFO / WARNING / ERROR
+  level: DEBUG
+
+cache:
+  # 是否启用 DNS 缓存
+  enabled: true
+  # 最大缓存条目数
+  max_size: 10000
+
+upstreams:
+  # ----------------------------
+  # 1) 传统映射方式（显式 protocol）
+  # ----------------------------
+  - host: 223.5.5.5
+    protocol: udp
+    port: 53
+    timeout: 2.0
+    # 服务器组标签。请求默认使用 default 组。
+    tag: default
+    # 可选：上游转发时附加 ECS
+    # ecs: 1.2.3.0/24
+
+  - host: 8.8.8.8
+    protocol: tcp
+    port: 53
+    timeout: 2.0
+    tag: default
+
+  - host: 1.1.1.1
+    protocol: dot
+    port: 853
+    timeout: 2.0
+    # verify: true | false | CA 文件路径
+    verify: true
+    # DoT/DoQ 的 SNI
+    hostname: cloudflare-dns.com
+    tag: secure
+
+  - host: 1.1.1.1
+    protocol: doq
+    port: 853
+    timeout: 2.0
+    verify: true
+    hostname: cloudflare-dns.com
+    tag: secure
+
+  - host: 1.1.1.1
+    protocol: doh
+    port: 443
+    timeout: 2.0
+    verify: true
+    # DoH 请求主机名（Host/SNI）
+    hostname: cloudflare-dns.com
+    # 可选：单独指定 HTTP Host
+    http_host: cloudflare-dns.com
+    # DoH Path
+    path: /dns-query
+    tag: secure
+
+  - host: 9.9.9.9
+    protocol: dnscrypt
+    port: 443
+    timeout: 2.0
+    # 二选一：
+    # 1) 直接写 stamp
+    # stamp: "sdns://..."
+    # 2) 写 provider_name + provider_pk
+    provider_name: 2.dnscrypt-cert.quad9.net
+    provider_pk: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    tag: secure
+
+  # ----------------------------
+  # 2) URL 方式（自动解析协议与参数）
+  # 支持：udp:// tcp:// tls:// https:// quic://
+  # ----------------------------
+  - url: "udp://119.29.29.29:53"
+    timeout: 2.0
+    tag: default
+
+  - url: "tcp://8.8.4.4:53"
+    timeout: 2.0
+    tag: default
+
+  - url: "tls://1.0.0.1:853"
+    timeout: 2.0
+    verify: true
+    # 可覆盖 URL 自动推断的 SNI
+    hostname: cloudflare-dns.com
+    tag: secure
+
+  - url: "https://1.1.1.1/dns-query"
+    timeout: 2.0
+    verify: true
+    # 当 url.host 为 IP 时，建议补 hostname/sni
+    hostname: cloudflare-dns.com
+    http_host: cloudflare-dns.com
+    tag: secure
+
+  - url: "quic://1.1.1.1:853"
+    timeout: 2.0
+    verify: true
+    hostname: cloudflare-dns.com
+    tag: secure
+
+  # 也支持把 URL 直接写在 host/address
+  - host: "https://dns.google/dns-query"
+    timeout: 2.0
+    tag: secure
+
+  # ----------------------------
+  # 3) DNS Stamp 方式（自动解析 plain/DoT/DoH/DoQ/DNSCrypt）
+  # ----------------------------
+  - stamp: "sdns://AAAAAAAAAAAACjguOC44Ljg6NTM"
+    timeout: 2.0
+    tag: default
+
+  # 字符串条目也支持 URL / Stamp / host
+  - "udp://114.114.114.114:53"
+  # - "sdns://..."
+  # - "223.5.5.5"

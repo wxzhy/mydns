@@ -2,93 +2,42 @@ from __future__ import annotations
 
 import asyncio
 import binascii
+import logging
 import socket
 import struct
-from dataclasses import dataclass
 from time import time
-from typing import Final
+from typing import Optional, Union
 
-import dns.asyncquery
-import dns.flags
 import dns.message
+import dns.name
+import dns.query
+import dns.rdataclass
 import dns.rdatatype
-import dnsstamps
-from dnsstamps import Protocol as StampProtocol
+import dns.resolver
+from dns.exception import FormError, Timeout
+from dns.flags import TC
+from dns.inet import is_multicast
+from dns.message import QueryMessage
+from dns.rcode import NXDOMAIN, YXDOMAIN
+from nacl.encoding import HexEncoder
+from nacl.exceptions import BadSignatureError
+from nacl.public import Box, PrivateKey, PublicKey
+from nacl.signing import VerifyKey
+from nacl.utils import random
 
-from Crypto.Cipher import ChaCha20_Poly1305
-from Crypto.Cipher import Salsa20
-from Crypto.Hash import Poly1305
-from Crypto.PublicKey import ECC
-from Crypto.Protocol import DH
-from Crypto.Random import get_random_bytes
-from Crypto.Signature import eddsa
-
-DNSCRYPT_CERT_MAGIC: Final[bytes] = b"DNSC"
-DNSCRYPT_RESOLVER_MAGIC: Final[bytes] = b"r6fnvWj8"
-DNSCRYPT_ES_VERSION_V1: Final[int] = 0x0001
-DNSCRYPT_ES_VERSION_V2: Final[int] = 0x0002
-
-DNSCRYPT_CLIENT_NONCE_SIZE: Final[int] = 12
-DNSCRYPT_NONCE_SIZE: Final[int] = 24
-DNSCRYPT_QUERY_MIN_SIZE: Final[int] = 256
-DNSCRYPT_QUERY_BLOCK_SIZE: Final[int] = 64
-DNSCRYPT_TAG_SIZE: Final[int] = 16
-
-DNSCRYPT_DEFAULT_PORT: Final[int] = 443
-DNSCRYPT_CERT_REFRESH_SECONDS: Final[int] = 3600
+DNSCRYPT_MINIMUM_SIZE = 256
+DNSCRYPT_MODULO_SIZE = 64
+DNSCRYPT_NONCE_SIZE = 12
+DNSCRYPT_RESOLVER_MAGIC = b"r6fnvWj8"
+DNSCRYPT_CERT_MAGIC = b"DNSC"
 
 
 class DnscryptError(RuntimeError):
     """DNSCrypt 处理异常。"""
 
 
-@dataclass(slots=True, frozen=True)
-class DnscryptStampInfo:
-    host: str
-    port: int
-    provider_name: str
-    provider_public_key: bytes
-
-
-@dataclass(slots=True, frozen=True)
-class _DnscryptCertificate:
-    es_version: int
-    resolver_public_key: bytes
-    client_magic: bytes
-    serial: int
-    ts_start: int
-    ts_end: int
-
-
-def parse_dnscrypt_stamp(stamp: str) -> DnscryptStampInfo:
-    """
-    解析 DNS stamp，仅接受 DNSCrypt 协议。
-    """
-    parameter = dnsstamps.parse(stamp)
-    if parameter.protocol != StampProtocol.DNSCRYPT:
-        raise DnscryptError(f"不支持的 stamp 协议: {parameter.protocol}")
-
-    host, port = _split_host_port(
-        _normalize_text(parameter.address),
-        default_port=DNSCRYPT_DEFAULT_PORT,
-    )
-    provider_name = _normalize_text(parameter.provider_name)
-    provider_public_key = normalize_provider_public_key(parameter.public_key)
-
-    if not provider_name:
-        raise DnscryptError("stamp 中缺少 provider_name。")
-    return DnscryptStampInfo(
-        host=host,
-        port=port,
-        provider_name=provider_name,
-        provider_public_key=provider_public_key,
-    )
-
-
 def normalize_provider_public_key(value: str | bytes) -> bytes:
-    """
-    标准化 provider 公钥到 32 字节原始数据。
-    """
+    """标准化 provider 公钥到 32 字节原始数据。"""
     if isinstance(value, bytes):
         if len(value) == 32:
             return value
@@ -111,353 +60,568 @@ def normalize_provider_public_key(value: str | bytes) -> bytes:
     return decoded
 
 
-class AsyncDnscryptClient:
-    """
-    基于 DNSCrypt（v1/v2）的异步客户端。
-    """
+class Resolver:
+    """原始同步 DNSCrypt Resolver。"""
 
     def __init__(
         self,
         address: str,
         provider_name: str,
-        provider_public_key: str | bytes,
-        *,
-        port: int = DNSCRYPT_DEFAULT_PORT,
-        timeout: float = 5.0,
-        tcp_only: bool = False,
+        provider_pk: str | bytes,
+        private_key: Optional[str] = None,
+        port: int = 53,
+        timeout: float = 5,
     ) -> None:
-        self._address = address.strip()
-        self._provider_name = provider_name.strip()
-        self._port = int(port)
-        self._timeout = float(timeout)
-        self._tcp_only = tcp_only
+        host, parsed_port = _split_host_port(address, default_port=port)
+        self.address: str = host
+        self.port: int = parsed_port
+        self.publickey: Optional[PublicKey] = None
+        self.client_magic: bytes = b""
+        self.serial: Optional[int] = None
+        self.tcp_only: bool = False
+        self.timeout: float = timeout
+        self._provider_name = provider_name
 
-        if not self._address:
-            raise DnscryptError("DNSCrypt address 不能为空。")
-        if not self._provider_name:
-            raise DnscryptError("DNSCrypt provider_name 不能为空。")
-        if self._timeout <= 0:
-            raise DnscryptError("DNSCrypt timeout 必须为正数。")
+        if not private_key:
+            self.private: PrivateKey = PrivateKey.generate()
+            logging.info("Private Key: %s", self.private.encode(HexEncoder))
+            logging.info("Public Key : %s", self.private.public_key.encode(HexEncoder))
+        else:
+            self.private = PrivateKey(private_key, HexEncoder)
 
-        provider_pk = normalize_provider_public_key(provider_public_key)
-        self._provider_verifier = eddsa.new(
-            eddsa.import_public_key(provider_pk),
-            mode="rfc8032",
+        vk = self._build_verify_key(provider_name=provider_name, provider_pk=provider_pk)
+        self._bootstrap(vk)
+        self._secretbox: Box = Box(self.private, self.publickey)  # type: ignore[arg-type]
+
+    def _build_verify_key(self, provider_name: str, provider_pk: str | bytes) -> VerifyKey:
+        try:
+            provider_public_key = normalize_provider_public_key(provider_pk)
+            return VerifyKey(provider_public_key)
+        except DnscryptError:
+            # 兼容历史行为：provider_pk 也可作为 TXT 记录域名。
+            try:
+                answer = dns.resolver.resolve(str(provider_pk), rdtype=dns.rdatatype.TXT)
+                fp = b"".join(answer.response.answer[0][0].strings)
+                return VerifyKey(normalize_provider_public_key(fp))
+            except Exception as exc:
+                raise TypeError(f"No valid public key for {provider_name}") from exc
+
+    def _bootstrap(self, verify_key: VerifyKey) -> None:
+        question = dns.message.make_query(self._provider_name, rdtype=dns.rdatatype.TXT)
+        try:
+            answer = dns.query.udp(
+                question,
+                self.address,
+                port=self.port,
+                timeout=self.timeout,
+            )
+            if answer.flags & TC:
+                answer = dns.query.tcp(
+                    question,
+                    self.address,
+                    port=self.port,
+                    timeout=self.timeout,
+                )
+        except Timeout:
+            logging.debug("DNSCrypt certificate query failed over UDP, falling back to TCP")
+            self.tcp_only = True
+            answer = dns.query.tcp(
+                question,
+                self.address,
+                port=self.port,
+                timeout=self.timeout,
+            )
+
+        self._load_certificate(answer=answer, verify_key=verify_key)
+        if not self.publickey:
+            raise TypeError(
+                "No valid certificate found for "
+                f"{self.address}:{self.port} ({self._provider_name})"
+            )
+        logging.info("Selected certificate %s", self.serial)
+
+    def _load_certificate(self, answer: dns.message.Message, verify_key: VerifyKey) -> None:
+        now = time()
+        for rrset in answer.answer:
+            if rrset.rdtype != dns.rdatatype.TXT:
+                continue
+            for possible in rrset:
+                cert_blob = b"".join(possible.strings)
+                if len(cert_blob) <= 8:
+                    continue
+
+                logging.debug("Possible cert %s", cert_blob.hex())
+                magic, es_version, _minor_version, signed = struct.unpack(
+                    f"!4sHH{len(cert_blob) - 8}s",
+                    cert_blob,
+                )
+                if magic != DNSCRYPT_CERT_MAGIC:
+                    logging.warning("Bad certificate magic: %s", magic)
+                    continue
+                if es_version != 1:
+                    logging.warning("Not using es_version 1")
+                    continue
+
+                try:
+                    data = verify_key.verify(signed)
+                except BadSignatureError:
+                    logging.warning("Signature did not match")
+                    continue
+
+                if len(data) < 52:
+                    continue
+                pk, client_magic, serial, start, expire, _ = struct.unpack(
+                    f"!32s8sIII{len(data) - 52}s",
+                    data,
+                )
+                if start > now:
+                    logging.warning("Certification not yet valid: %s", start)
+                    continue
+                if expire < now:
+                    logging.warning("Certificate expired %s", expire)
+                    continue
+                if self.serial is None or serial > self.serial:
+                    self.publickey = PublicKey(pk)
+                    self.serial = serial
+                    self.client_magic = client_magic
+
+    def query(
+        self,
+        qname: Union[dns.name.Name, str],
+        rdtype: Union[dns.rdatatype.RdataType, str] = dns.rdatatype.A,
+        rdclass: Union[dns.rdataclass.RdataClass, str] = dns.rdataclass.IN,
+        tcp: bool = False,
+        source: Optional[str] = None,
+        raise_on_no_answer: bool = True,
+        source_port: int = 0,
+    ) -> dns.resolver.Answer:
+        qname, rdtype, rdclass, query = _build_query_message(
+            qname=qname,
+            rdtype=rdtype,
+            rdclass=rdclass,
+        )
+        response = self.query_message(
+            query=query,
+            tcp=tcp,
+            source=source,
+            source_port=source_port,
+        )
+        _raise_for_response_code(response=response, qname=qname)
+        return dns.resolver.Answer(
+            qname,
+            rdtype,
+            rdclass,
+            response,
+            raise_on_no_answer,
         )
 
-        self._client_private_key = ECC.generate(curve="curve25519")
-        self._client_public_key = self._client_private_key.public_key().export_key(
-            format="raw"
+    def query_message(
+        self,
+        query: QueryMessage,
+        tcp: bool = False,
+        source: Optional[str] = None,
+        source_port: int = 0,
+    ) -> dns.message.Message:
+        response: dns.message.Message | None = None
+        try:
+            tcp_attempt = False
+            if tcp or self.tcp_only:
+                tcp_attempt = True
+                response = self.tcp(
+                    query,
+                    timeout=self.timeout,
+                    source=source,
+                    source_port=source_port,
+                )
+            else:
+                response = self.udp(
+                    query,
+                    timeout=self.timeout,
+                    source=source,
+                    source_port=source_port,
+                )
+                if response.flags & TC:
+                    tcp_attempt = True
+                    response = self.tcp(
+                        query,
+                        timeout=self.timeout,
+                        source=source,
+                        source_port=source_port,
+                    )
+        except (
+            socket.error,
+            Timeout,
+            FormError,
+            dns.query.UnexpectedSource,
+            EOFError,
+        ) as ex:
+            raise dns.resolver.NoNameservers(
+                request=query,
+                errors=[(self.address, tcp_attempt, self.port, ex, response)],
+            ) from ex
+        return response
+
+    def _encrypt_query(self, query: QueryMessage) -> bytes:
+        if not self.client_magic:
+            raise DnscryptError("DNSCrypt client not initialized with certificate.")
+
+        message = _pad_query(query.to_wire())
+        nonce = random(DNSCRYPT_NONCE_SIZE)
+        encrypted = self._secretbox.encrypt(message, nonce + b"\x00" * DNSCRYPT_NONCE_SIZE)
+        # Remove the server nonce.
+        encrypted = encrypted[0:12] + encrypted[24:]
+        return self.client_magic + self.private.public_key.encode() + encrypted
+
+    def _decrypt_response(self, wire: bytes, one_rr_per_rrset: bool) -> dns.message.Message:
+        if len(wire) <= 32:
+            raise TypeError("Invalid DNSCrypt response size")
+
+        magic, nonce, data = struct.unpack(f"!8s24s{len(wire) - 32}s", wire)
+        if magic != DNSCRYPT_RESOLVER_MAGIC:
+            raise TypeError("This does not appear to be DNSCrypt")
+
+        payload = self._secretbox.decrypt(data, nonce)
+        return dns.message.from_wire(
+            payload,
+            ignore_trailing=True,
+            one_rr_per_rrset=one_rr_per_rrset,
         )
 
-        self._certificate: _DnscryptCertificate | None = None
-        self._shared_key: bytes | None = None
-        self._next_refresh_at: float = 0.0
-        self._cert_lock = asyncio.Lock()
+    def tcp(
+        self,
+        query: QueryMessage,
+        timeout: Optional[float] = None,
+        af: Optional[int] = None,
+        source: Optional[str] = None,
+        source_port: int = 0,
+        one_rr_per_rrset: bool = False,
+    ) -> dns.message.Message:
+        wire = self._encrypt_query(query)
+        af, destination, source = dns.query._destination_and_source(
+            self.address,
+            self.port,
+            source,
+            source_port,
+            where_must_be_address=False,
+        )
+        s = dns.query.socket_factory(af, socket.SOCK_STREAM)
+        begin_time = None
+        try:
+            _, expiration = dns.query._compute_times(timeout)
+            s.setblocking(False)
+            if source is not None:
+                s.bind(source)
+            dns.query._connect(s, destination)
+            tcpmsg = struct.pack("!H", len(wire)) + wire
+            begin_time = time()
+            dns.query._net_write(s, tcpmsg, expiration)
+            ldata = dns.query._net_read(s, 2, expiration)
+            (length,) = struct.unpack("!H", ldata)
+            wire = dns.query._net_read(s, length, expiration)
+        finally:
+            response_time = 0 if begin_time is None else time() - begin_time
+            s.close()
+
+        response = self._decrypt_response(wire, one_rr_per_rrset)
+        response.time = response_time
+        if not query.is_response(response):
+            raise dns.query.BadResponse
+        return response
+
+    def udp(
+        self,
+        query: QueryMessage,
+        timeout: Optional[float] = None,
+        af: Optional[int] = None,
+        source: Optional[str] = None,
+        source_port: int = 0,
+        ignore_unexpected: bool = False,
+        one_rr_per_rrset: bool = False,
+    ) -> dns.message.Message:
+        wire = self._encrypt_query(query)
+        af, destination, source = dns.query._destination_and_source(
+            self.address,
+            self.port,
+            source,
+            source_port,
+            where_must_be_address=False,
+        )
+
+        s = dns.query.socket_factory(af, socket.SOCK_DGRAM)
+        begin_time = None
+        try:
+            _, expiration = dns.query._compute_times(timeout)
+            s.setblocking(False)
+            if source is not None:
+                s.bind(source)
+            dns.query._wait_for_writable(s, expiration)
+            begin_time = time()
+            s.sendto(wire, destination)
+            while True:
+                dns.query._wait_for_readable(s, expiration)
+                wire, from_address = s.recvfrom(65535)
+                if dns.query._addresses_equal(af, from_address, destination) or (
+                    is_multicast(self.address) and from_address[1:] == destination[1:]
+                ):
+                    break
+                if not ignore_unexpected:
+                    raise dns.query.UnexpectedSource(
+                        f"got a response from {from_address} instead of {destination}"
+                    )
+        finally:
+            response_time = 0 if begin_time is None else time() - begin_time
+            s.close()
+
+        response = self._decrypt_response(wire, one_rr_per_rrset)
+        response.time = response_time
+        if not query.is_response(response):
+            raise dns.query.BadResponse
+        return response
+
+
+class AsyncResolver(Resolver):
+    """异步 DNSCrypt Resolver（基于同步实现包装，兼容 UDP/TCP）。"""
+
+    @classmethod
+    async def create(
+        cls,
+        address: str,
+        provider_name: str,
+        provider_pk: str | bytes,
+        private_key: Optional[str] = None,
+        port: int = 53,
+        timeout: float = 5,
+    ) -> "AsyncResolver":
+        return await asyncio.to_thread(
+            cls,
+            address,
+            provider_name,
+            provider_pk,
+            private_key,
+            port,
+            timeout,
+        )
 
     async def query(
         self,
-        query: dns.message.Message,
-        *,
-        force_tcp: bool = False,
+        qname: Union[dns.name.Name, str],
+        rdtype: Union[dns.rdatatype.RdataType, str] = dns.rdatatype.A,
+        rdclass: Union[dns.rdataclass.RdataClass, str] = dns.rdataclass.IN,
+        tcp: bool = False,
+        source: Optional[str] = None,
+        raise_on_no_answer: bool = True,
+        source_port: int = 0,
+    ) -> dns.resolver.Answer:
+        qname, rdtype, rdclass, query = _build_query_message(
+            qname=qname,
+            rdtype=rdtype,
+            rdclass=rdclass,
+        )
+        response = await self.query_message(
+            query=query,
+            tcp=tcp,
+            source=source,
+            source_port=source_port,
+        )
+        _raise_for_response_code(response=response, qname=qname)
+        return dns.resolver.Answer(
+            qname,
+            rdtype,
+            rdclass,
+            response,
+            raise_on_no_answer,
+        )
+
+    async def query_message(
+        self,
+        query: QueryMessage,
+        tcp: bool = False,
+        source: Optional[str] = None,
+        source_port: int = 0,
     ) -> dns.message.Message:
-        await self._ensure_ready()
-        use_tcp = force_tcp or self._tcp_only
-        if use_tcp:
-            return await self._query_tcp(query)
-
-        try:
-            response = await self._query_udp(query)
-        except (OSError, TimeoutError, DnscryptError):
-            return await self._query_tcp(query)
-
-        if response.flags & dns.flags.TC:
-            return await self._query_tcp(query)
-        return response
-
-    async def _ensure_ready(self) -> None:
-        if self._is_certificate_fresh():
-            return
-
-        async with self._cert_lock:
-            if self._is_certificate_fresh():
-                return
-            await self._refresh_certificate()
-
-    def _is_certificate_fresh(self) -> bool:
-        cert = self._certificate
-        now = time()
-        if cert is None:
-            return False
-        if not (cert.ts_start <= now <= cert.ts_end):
-            return False
-        return now < self._next_refresh_at and self._shared_key is not None
-
-    async def _refresh_certificate(self) -> None:
-        now = int(time())
-        certificates = await self._fetch_certificates()
-        candidates = [
-            cert for cert in certificates if cert.ts_start <= now <= cert.ts_end
-        ]
-        if not candidates:
-            raise DnscryptError("未找到有效的 DNSCrypt 证书。")
-
-        selected = max(candidates, key=lambda cert: cert.serial)
-        resolver_pub = DH.import_x25519_public_key(selected.resolver_public_key)
-        shared_key = DH.key_agreement(
-            static_priv=self._client_private_key,
-            static_pub=resolver_pub,
-            kdf=lambda x: x,
-        )
-
-        self._certificate = selected
-        self._shared_key = self._derive_session_key(shared_key, selected.es_version)
-
-        refresh_at = min(
-            float(selected.ts_end - 60),
-            time() + DNSCRYPT_CERT_REFRESH_SECONDS,
-        )
-        if refresh_at <= time():
-            refresh_at = time() + 30
-        self._next_refresh_at = refresh_at
-
-    async def _fetch_certificates(self) -> list[_DnscryptCertificate]:
-        question = dns.message.make_query(self._provider_name, dns.rdatatype.TXT)
         response: dns.message.Message | None = None
-
         try:
-            response = await dns.asyncquery.udp(
-                q=question,
-                where=self._address,
-                port=self._port,
-                timeout=self._timeout,
-                ignore_unexpected=True,
-            )
-            if response.flags & dns.flags.TC:
-                response = await dns.asyncquery.tcp(
-                    q=question,
-                    where=self._address,
-                    port=self._port,
-                    timeout=self._timeout,
+            tcp_attempt = False
+            if tcp or self.tcp_only:
+                tcp_attempt = True
+                response = await self.tcp(
+                    query,
+                    timeout=self.timeout,
+                    source=source,
+                    source_port=source_port,
                 )
-        except Exception:
-            response = await dns.asyncquery.tcp(
-                q=question,
-                where=self._address,
-                port=self._port,
-                timeout=self._timeout,
-            )
-
-        certs: list[_DnscryptCertificate] = []
-        for rrset in response.answer:
-            if rrset.rdtype != dns.rdatatype.TXT:
-                continue
-            for item in rrset:
-                candidate = self._parse_certificate(b"".join(item.strings))
-                if candidate is not None:
-                    certs.append(candidate)
-        if not certs:
-            raise DnscryptError(
-                f"{self._address}:{self._port} 未返回可用 DNSCrypt 证书。"
-            )
-        return certs
-
-    def _parse_certificate(self, cert_bytes: bytes) -> _DnscryptCertificate | None:
-        if len(cert_bytes) < 8 + 64 + 52:
-            return None
-
-        magic, es_version, _minor_version = struct.unpack("!4sHH", cert_bytes[:8])
-        if magic != DNSCRYPT_CERT_MAGIC:
-            return None
-        if es_version not in (DNSCRYPT_ES_VERSION_V1, DNSCRYPT_ES_VERSION_V2):
-            return None
-
-        signed = cert_bytes[8:]
-        signature = signed[:64]
-        payload = signed[64:]
-        if len(payload) < 52:
-            return None
-
-        try:
-            self._provider_verifier.verify(payload, signature)
-        except ValueError:
-            return None
-
-        resolver_pk, client_magic, serial, ts_start, ts_end = struct.unpack(
-            "!32s8sIII",
-            payload[:52],
-        )
-        return _DnscryptCertificate(
-            es_version=es_version,
-            resolver_public_key=resolver_pk,
-            client_magic=client_magic,
-            serial=serial,
-            ts_start=ts_start,
-            ts_end=ts_end,
-        )
-
-    async def _query_udp(self, query: dns.message.Message) -> dns.message.Message:
-        packet, client_nonce = self._build_encrypted_query_packet(query)
-        wire = await self._exchange_udp(packet)
-        return self._decrypt_response(query, client_nonce, wire)
-
-    async def _query_tcp(self, query: dns.message.Message) -> dns.message.Message:
-        packet, client_nonce = self._build_encrypted_query_packet(query)
-        wire = await self._exchange_tcp(packet)
-        return self._decrypt_response(query, client_nonce, wire)
-
-    def _build_encrypted_query_packet(
-        self,
-        query: dns.message.Message,
-    ) -> tuple[bytes, bytes]:
-        cert = self._certificate
-        shared_key = self._shared_key
-        if cert is None or shared_key is None:
-            raise DnscryptError("DNSCrypt 客户端尚未初始化证书。")
-
-        payload = _apply_query_padding(query.to_wire())
-        client_nonce = get_random_bytes(DNSCRYPT_CLIENT_NONCE_SIZE)
-        full_nonce = client_nonce + (b"\x00" * DNSCRYPT_CLIENT_NONCE_SIZE)
-
-        encrypted_payload = _encrypt_payload(
-            es_version=cert.es_version,
-            key=shared_key,
-            nonce=full_nonce,
-            payload=payload,
-        )
-
-        packet = (
-            cert.client_magic
-            + self._client_public_key
-            + client_nonce
-            + encrypted_payload
-        )
-        return packet, client_nonce
-
-    async def _exchange_udp(self, packet: bytes) -> bytes:
-        loop = asyncio.get_running_loop()
-        addrinfo = await loop.getaddrinfo(
-            self._address,
-            self._port,
-            type=socket.SOCK_DGRAM,
-        )
-        if not addrinfo:
-            raise DnscryptError("无法解析 DNSCrypt 上游地址。")
-
-        family, socktype, proto, _, sockaddr = addrinfo[0]
-        sock = socket.socket(family, socktype, proto)
-        sock.setblocking(False)
-        try:
-            await asyncio.wait_for(
-                loop.sock_sendto(sock, packet, sockaddr),
-                timeout=self._timeout,
-            )
-            wire, _ = await asyncio.wait_for(
-                loop.sock_recvfrom(sock, 65535),
-                timeout=self._timeout,
-            )
-            return wire
-        finally:
-            sock.close()
-
-    async def _exchange_tcp(self, packet: bytes) -> bytes:
-        try:
-            reader, writer = await asyncio.wait_for(
-                asyncio.open_connection(self._address, self._port),
-                timeout=self._timeout,
-            )
-        except Exception as exc:
-            raise DnscryptError(f"DNSCrypt TCP 连接失败: {exc}") from exc
-
-        try:
-            frame = struct.pack("!H", len(packet)) + packet
-            writer.write(frame)
-            await asyncio.wait_for(writer.drain(), timeout=self._timeout)
-
-            length_data = await asyncio.wait_for(
-                reader.readexactly(2),
-                timeout=self._timeout,
-            )
-            (length,) = struct.unpack("!H", length_data)
-            if length <= 0:
-                raise DnscryptError("DNSCrypt TCP 响应长度非法。")
-            return await asyncio.wait_for(
-                reader.readexactly(length),
-                timeout=self._timeout,
-            )
-        except asyncio.IncompleteReadError as exc:
-            raise DnscryptError("DNSCrypt TCP 响应不完整。") from exc
-        finally:
-            writer.close()
-            await writer.wait_closed()
-
-    def _decrypt_response(
-        self,
-        query: dns.message.Message,
-        client_nonce: bytes,
-        wire: bytes,
-    ) -> dns.message.Message:
-        shared_key = self._shared_key
-        if shared_key is None:
-            raise DnscryptError("DNSCrypt 会话密钥不存在。")
-        if len(wire) < 8 + DNSCRYPT_NONCE_SIZE + DNSCRYPT_TAG_SIZE:
-            raise DnscryptError("DNSCrypt 响应长度不足。")
-
-        magic = wire[:8]
-        if magic != DNSCRYPT_RESOLVER_MAGIC:
-            raise DnscryptError("DNSCrypt 响应 magic 不匹配。")
-
-        nonce = wire[8 : 8 + DNSCRYPT_NONCE_SIZE]
-        if nonce[:DNSCRYPT_CLIENT_NONCE_SIZE] != client_nonce:
-            raise DnscryptError("DNSCrypt 响应 nonce 与请求不匹配。")
-
-        encrypted = wire[8 + DNSCRYPT_NONCE_SIZE :]
-        cert = self._certificate
-        if cert is None:
-            raise DnscryptError("DNSCrypt 证书状态丢失。")
-
-        try:
-            plaintext = _decrypt_payload(
-                es_version=cert.es_version,
-                key=shared_key,
-                nonce=nonce,
-                payload=encrypted,
-            )
-        except ValueError as exc:
-            raise DnscryptError("DNSCrypt 响应认证失败。") from exc
-
-        response = dns.message.from_wire(
-            _remove_query_padding(plaintext),
-            ignore_trailing=True,
-        )
-        if not query.is_response(response):
-            raise DnscryptError("DNSCrypt 响应与请求不匹配。")
+            else:
+                response = await self.udp(
+                    query,
+                    timeout=self.timeout,
+                    source=source,
+                    source_port=source_port,
+                )
+                if response.flags & TC:
+                    tcp_attempt = True
+                    response = await self.tcp(
+                        query,
+                        timeout=self.timeout,
+                        source=source,
+                        source_port=source_port,
+                    )
+        except (
+            socket.error,
+            TimeoutError,
+            Timeout,
+            FormError,
+            dns.query.UnexpectedSource,
+            EOFError,
+        ) as ex:
+            raise dns.resolver.NoNameservers(
+                request=query,
+                errors=[(self.address, tcp_attempt, self.port, ex, response)],
+            ) from ex
         return response
 
-    @staticmethod
-    def _derive_session_key(shared_key: bytes, es_version: int) -> bytes:
-        if es_version == DNSCRYPT_ES_VERSION_V1:
-            return _hsalsa20(
-                key=shared_key,
-                nonce16=(b"\x00" * 16),
-            )
-        return shared_key
+    async def tcp(
+        self,
+        query: QueryMessage,
+        timeout: Optional[float] = None,
+        af: Optional[int] = None,
+        source: Optional[str] = None,
+        source_port: int = 0,
+        one_rr_per_rrset: bool = False,
+    ) -> dns.message.Message:
+        return await asyncio.to_thread(
+            Resolver.tcp,
+            self,
+            query,
+            timeout,
+            af,
+            source,
+            source_port,
+            one_rr_per_rrset,
+        )
+
+    async def udp(
+        self,
+        query: QueryMessage,
+        timeout: Optional[float] = None,
+        af: Optional[int] = None,
+        source: Optional[str] = None,
+        source_port: int = 0,
+        ignore_unexpected: bool = False,
+        one_rr_per_rrset: bool = False,
+    ) -> dns.message.Message:
+        return await asyncio.to_thread(
+            Resolver.udp,
+            self,
+            query,
+            timeout,
+            af,
+            source,
+            source_port,
+            ignore_unexpected,
+            one_rr_per_rrset,
+        )
 
 
-def _normalize_text(value: str | bytes) -> str:
-    if isinstance(value, bytes):
-        return value.decode("utf-8", errors="ignore").strip()
-    return value.strip()
-
-
-def _split_host_port(
-    address: str,
+async def async_query(
+    resolver: AsyncResolver,
+    query: QueryMessage,
     *,
-    default_port: int,
-) -> tuple[str, int]:
+    tcp: bool = False,
+    source: Optional[str] = None,
+    source_port: int = 0,
+) -> dns.message.Message:
+    """异步查询入口，自动处理 UDP/TCP。"""
+    return await resolver.query_message(
+        query=query,
+        tcp=tcp,
+        source=source,
+        source_port=source_port,
+    )
+
+
+async def async_tcp(
+    resolver: AsyncResolver,
+    query: QueryMessage,
+    *,
+    timeout: Optional[float] = None,
+    source: Optional[str] = None,
+    source_port: int = 0,
+    one_rr_per_rrset: bool = False,
+) -> dns.message.Message:
+    """强制使用 TCP 异步查询。"""
+    return await resolver.tcp(
+        query=query,
+        timeout=timeout,
+        source=source,
+        source_port=source_port,
+        one_rr_per_rrset=one_rr_per_rrset,
+    )
+
+
+async def async_udp(
+    resolver: AsyncResolver,
+    query: QueryMessage,
+    *,
+    timeout: Optional[float] = None,
+    source: Optional[str] = None,
+    source_port: int = 0,
+    ignore_unexpected: bool = False,
+    one_rr_per_rrset: bool = False,
+) -> dns.message.Message:
+    """强制使用 UDP 异步查询。"""
+    return await resolver.udp(
+        query=query,
+        timeout=timeout,
+        source=source,
+        source_port=source_port,
+        ignore_unexpected=ignore_unexpected,
+        one_rr_per_rrset=one_rr_per_rrset,
+    )
+
+
+def _build_query_message(
+    qname: Union[dns.name.Name, str],
+    rdtype: Union[dns.rdatatype.RdataType, str],
+    rdclass: Union[dns.rdataclass.RdataClass, str],
+) -> tuple[dns.name.Name, dns.rdatatype.RdataType, dns.rdataclass.RdataClass, QueryMessage]:
+    if isinstance(qname, str):
+        qname = dns.name.from_text(qname, None)
+    if isinstance(rdtype, str):
+        rdtype = dns.rdatatype.from_text(rdtype)
+    if dns.rdatatype.is_metatype(rdtype):
+        raise dns.resolver.NoMetaqueries
+    if isinstance(rdclass, str):
+        rdclass = dns.rdataclass.from_text(rdclass)
+    if dns.rdataclass.is_metaclass(rdclass):
+        raise dns.resolver.NoMetaqueries
+    if not qname.is_absolute():
+        qname = qname.concatenate(dns.name.root)
+
+    query = dns.message.make_query(qname, rdtype=rdtype, rdclass=rdclass)
+    return qname, rdtype, rdclass, query
+
+
+def _raise_for_response_code(response: dns.message.Message, qname: dns.name.Name) -> None:
+    rcode = response.rcode()
+    if rcode == YXDOMAIN:
+        raise dns.resolver.YXDOMAIN()
+    if rcode == NXDOMAIN:
+        raise dns.resolver.NXDOMAIN(qnames=[qname], responses=[response])
+
+
+def _pad_query(payload: bytes) -> bytes:
+    base_len = max(DNSCRYPT_MINIMUM_SIZE, len(payload) + 1)
+    target_len = (
+        (base_len + DNSCRYPT_MODULO_SIZE - 1) // DNSCRYPT_MODULO_SIZE
+    ) * DNSCRYPT_MODULO_SIZE
+    pad_len = target_len - len(payload)
+    return payload + b"\x80" + (b"\x00" * (pad_len - 1))
+
+
+def _split_host_port(address: str, *, default_port: int) -> tuple[str, int]:
     text = address.strip()
     if not text:
-        raise DnscryptError("address 不能为空。")
+        return "", default_port
 
     if text.startswith("["):
         right = text.find("]")
@@ -488,193 +652,12 @@ def _parse_port(value: str, *, default_port: int) -> int:
     return port
 
 
-def _apply_query_padding(payload: bytes) -> bytes:
-    base_len = max(DNSCRYPT_QUERY_MIN_SIZE, len(payload) + 1)
-    target_len = (
-        (base_len + DNSCRYPT_QUERY_BLOCK_SIZE - 1) // DNSCRYPT_QUERY_BLOCK_SIZE
-    ) * DNSCRYPT_QUERY_BLOCK_SIZE
-    pad_len = target_len - len(payload)
-    if pad_len <= 0:
-        pad_len = 1
-    return payload + b"\x80" + (b"\x00" * (pad_len - 1))
-
-
-def _remove_query_padding(payload: bytes) -> bytes:
-    index = len(payload) - 1
-    while index >= 0 and payload[index] == 0:
-        index -= 1
-    if index >= 0 and payload[index] == 0x80:
-        return payload[:index]
-    return payload
-
-
-def _encrypt_payload(
-    *,
-    es_version: int,
-    key: bytes,
-    nonce: bytes,
-    payload: bytes,
-) -> bytes:
-    if es_version == DNSCRYPT_ES_VERSION_V1:
-        return _xsalsa20poly1305_encrypt(key=key, nonce=nonce, plaintext=payload)
-    if es_version == DNSCRYPT_ES_VERSION_V2:
-        cipher = ChaCha20_Poly1305.new(key=key, nonce=nonce)
-        ciphertext, tag = cipher.encrypt_and_digest(payload)
-        return tag + ciphertext
-    raise DnscryptError(f"不支持的 DNSCrypt 证书版本: {es_version}")
-
-
-def _decrypt_payload(
-    *,
-    es_version: int,
-    key: bytes,
-    nonce: bytes,
-    payload: bytes,
-) -> bytes:
-    if len(payload) < DNSCRYPT_TAG_SIZE:
-        raise ValueError("payload too short")
-    if es_version == DNSCRYPT_ES_VERSION_V1:
-        return _xsalsa20poly1305_decrypt(key=key, nonce=nonce, payload=payload)
-    if es_version == DNSCRYPT_ES_VERSION_V2:
-        tag = payload[:DNSCRYPT_TAG_SIZE]
-        ciphertext = payload[DNSCRYPT_TAG_SIZE:]
-        cipher = ChaCha20_Poly1305.new(key=key, nonce=nonce)
-        return cipher.decrypt_and_verify(ciphertext, tag)
-    raise DnscryptError(f"不支持的 DNSCrypt 证书版本: {es_version}")
-
-
-def _xsalsa20poly1305_encrypt(
-    *,
-    key: bytes,
-    nonce: bytes,
-    plaintext: bytes,
-) -> bytes:
-    stream = Salsa20.new(
-        key=_hsalsa20(key=key, nonce16=nonce[:16]),
-        nonce=nonce[16:],
-    )
-    poly_key = stream.encrypt(b"\x00" * 32)
-    ciphertext = stream.encrypt(plaintext)
-    mac = Poly1305.Poly1305_MAC(poly_key[:16], poly_key[16:], ciphertext)
-    return mac.digest() + ciphertext
-
-
-def _xsalsa20poly1305_decrypt(
-    *,
-    key: bytes,
-    nonce: bytes,
-    payload: bytes,
-) -> bytes:
-    tag = payload[:DNSCRYPT_TAG_SIZE]
-    ciphertext = payload[DNSCRYPT_TAG_SIZE:]
-
-    stream = Salsa20.new(
-        key=_hsalsa20(key=key, nonce16=nonce[:16]),
-        nonce=nonce[16:],
-    )
-    poly_key = stream.encrypt(b"\x00" * 32)
-    mac = Poly1305.Poly1305_MAC(poly_key[:16], poly_key[16:], ciphertext)
-    mac.verify(tag)
-    return stream.encrypt(ciphertext)
-
-
-def _hsalsa20(*, key: bytes, nonce16: bytes) -> bytes:
-    if len(key) != 32:
-        raise ValueError("HSalsa20 key must be 32 bytes")
-    if len(nonce16) != 16:
-        raise ValueError("HSalsa20 nonce must be 16 bytes")
-
-    sigma = b"expand 32-byte k"
-    k = struct.unpack("<8I", key)
-    n = struct.unpack("<4I", nonce16)
-    c = struct.unpack("<4I", sigma)
-    state = [
-        c[0],
-        k[0],
-        k[1],
-        k[2],
-        k[3],
-        c[1],
-        n[0],
-        n[1],
-        n[2],
-        n[3],
-        c[2],
-        k[4],
-        k[5],
-        k[6],
-        k[7],
-        c[3],
-    ]
-    working = state[:]
-
-    for _ in range(10):
-        _salsa20_rounds(working)
-
-    output = (
-        working[0],
-        working[5],
-        working[10],
-        working[15],
-        working[6],
-        working[7],
-        working[8],
-        working[9],
-    )
-    return struct.pack("<8I", *output)
-
-
-def _salsa20_rounds(x: list[int]) -> None:
-    x[4] ^= _rol32((x[0] + x[12]) & 0xFFFFFFFF, 7)
-    x[8] ^= _rol32((x[4] + x[0]) & 0xFFFFFFFF, 9)
-    x[12] ^= _rol32((x[8] + x[4]) & 0xFFFFFFFF, 13)
-    x[0] ^= _rol32((x[12] + x[8]) & 0xFFFFFFFF, 18)
-
-    x[9] ^= _rol32((x[5] + x[1]) & 0xFFFFFFFF, 7)
-    x[13] ^= _rol32((x[9] + x[5]) & 0xFFFFFFFF, 9)
-    x[1] ^= _rol32((x[13] + x[9]) & 0xFFFFFFFF, 13)
-    x[5] ^= _rol32((x[1] + x[13]) & 0xFFFFFFFF, 18)
-
-    x[14] ^= _rol32((x[10] + x[6]) & 0xFFFFFFFF, 7)
-    x[2] ^= _rol32((x[14] + x[10]) & 0xFFFFFFFF, 9)
-    x[6] ^= _rol32((x[2] + x[14]) & 0xFFFFFFFF, 13)
-    x[10] ^= _rol32((x[6] + x[2]) & 0xFFFFFFFF, 18)
-
-    x[3] ^= _rol32((x[15] + x[11]) & 0xFFFFFFFF, 7)
-    x[7] ^= _rol32((x[3] + x[15]) & 0xFFFFFFFF, 9)
-    x[11] ^= _rol32((x[7] + x[3]) & 0xFFFFFFFF, 13)
-    x[15] ^= _rol32((x[11] + x[7]) & 0xFFFFFFFF, 18)
-
-    x[1] ^= _rol32((x[0] + x[3]) & 0xFFFFFFFF, 7)
-    x[2] ^= _rol32((x[1] + x[0]) & 0xFFFFFFFF, 9)
-    x[3] ^= _rol32((x[2] + x[1]) & 0xFFFFFFFF, 13)
-    x[0] ^= _rol32((x[3] + x[2]) & 0xFFFFFFFF, 18)
-
-    x[6] ^= _rol32((x[5] + x[4]) & 0xFFFFFFFF, 7)
-    x[7] ^= _rol32((x[6] + x[5]) & 0xFFFFFFFF, 9)
-    x[4] ^= _rol32((x[7] + x[6]) & 0xFFFFFFFF, 13)
-    x[5] ^= _rol32((x[4] + x[7]) & 0xFFFFFFFF, 18)
-
-    x[11] ^= _rol32((x[10] + x[9]) & 0xFFFFFFFF, 7)
-    x[8] ^= _rol32((x[11] + x[10]) & 0xFFFFFFFF, 9)
-    x[9] ^= _rol32((x[8] + x[11]) & 0xFFFFFFFF, 13)
-    x[10] ^= _rol32((x[9] + x[8]) & 0xFFFFFFFF, 18)
-
-    x[12] ^= _rol32((x[15] + x[14]) & 0xFFFFFFFF, 7)
-    x[13] ^= _rol32((x[12] + x[15]) & 0xFFFFFFFF, 9)
-    x[14] ^= _rol32((x[13] + x[12]) & 0xFFFFFFFF, 13)
-    x[15] ^= _rol32((x[14] + x[13]) & 0xFFFFFFFF, 18)
-
-
-def _rol32(value: int, shift: int) -> int:
-    value &= 0xFFFFFFFF
-    return ((value << shift) | (value >> (32 - shift))) & 0xFFFFFFFF
-
-
 __all__ = [
-    "AsyncDnscryptClient",
+    "Resolver",
+    "AsyncResolver",
     "DnscryptError",
-    "DnscryptStampInfo",
     "normalize_provider_public_key",
-    "parse_dnscrypt_stamp",
+    "async_query",
+    "async_tcp",
+    "async_udp",
 ]
