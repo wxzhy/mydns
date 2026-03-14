@@ -19,6 +19,17 @@ cache:
   # 最大缓存条目数
   max_size: 10000
 
+rules:
+  # domainset 目录列表：每个 .txt 文件名视为 tag，文件内容为域名规则
+  domainset_dirs:
+    - ./rulesets/domainset
+  # ipset 目录列表：每个 .txt 文件名视为 tag，文件内容为 IP/CIDR 规则
+  ipset_dirs:
+    - ./rulesets/ipset
+  # 命中这些 tag 时，直接返回 NOERROR 空结果（广告拦截常用）
+  ad_block_tags:
+    - ad
+
 upstreams:
   # ----------------------------
   # 1) 传统映射方式（显式 protocol）

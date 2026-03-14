@@ -174,6 +174,34 @@ class DomainSet:
             matched.update(self._key_to_identifiers.get(prefix_key, ()))
         return matched
 
+    def match_best(self, domain: str) -> str | None:
+        """
+        返回“最长后缀命中”的单个标识。
+
+        例如查询 `a.b.c.d`，若同时命中 `c.d` 与 `b.c.d`，优先返回 `b.c.d` 对应标识。
+        当同一规则关联多个标识时，返回排序后第一个，保证结果稳定。
+        """
+        normalized = _normalize_domain(domain)
+        if not normalized:
+            return None
+
+        self._ensure_trie()
+        if self._trie is None:
+            return None
+
+        key = _to_reverse_key(normalized)
+        best_prefix: str | None = None
+        for prefix_key in self._trie.prefixes(key):
+            if best_prefix is None or len(prefix_key) > len(best_prefix):
+                best_prefix = prefix_key
+        if best_prefix is None:
+            return None
+
+        identifiers = self._key_to_identifiers.get(best_prefix)
+        if not identifiers:
+            return None
+        return sorted(identifiers)[0]
+
     def contains(self, domain: str, identifier: str | None = None) -> bool:
         matched = self.match(domain)
         if not matched:

@@ -6,17 +6,25 @@ from core.hooks import RequestHook, ResponseHook, UpstreamHook
 from rules.request import build_request_hooks
 from rules.response import build_response_hooks
 from rules.upstream import build_upstream_hooks
+from utils.domainset import DomainSet
+from utils.ipset import IPSet
 
 
 def build_hooks(
     blocked_domains: Iterable[str] | None = None,
     hosts: Mapping[str, str] | None = None,
+    domainset: DomainSet | None = None,
+    ipset: IPSet | None = None,
+    ad_block_tags: Iterable[str] | None = None,
     enable_debug: bool = True,
 ) -> tuple[object, ...]:
     """按阶段构建 hook 列表，便于统一装配与扩展。"""
     request_hooks: tuple[RequestHook, ...] = build_request_hooks(
         blocked_domains=blocked_domains,
         hosts=hosts,
+        domainset=domainset,
+        ipset=ipset,
+        ad_block_tags=ad_block_tags,
         enable_debug=enable_debug,
     )
     upstream_hooks: tuple[UpstreamHook, ...] = build_upstream_hooks(

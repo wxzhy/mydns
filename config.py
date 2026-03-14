@@ -58,6 +58,13 @@ class CacheConfig:
     max_size: int = 10000
 
 
+@dataclass(frozen=True, slots=True)
+class RuleConfig:
+    domainset_dirs: tuple[str, ...] = ()
+    ipset_dirs: tuple[str, ...] = ()
+    ad_block_tags: tuple[str, ...] = ()
+
+
 def _default_upstreams() -> tuple[UpstreamConfig, ...]:
     return (
         UpstreamConfig(
@@ -83,12 +90,14 @@ class AppConfig:
     upstreams: tuple[UpstreamConfig, ...] = field(default_factory=_default_upstreams)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     cache: CacheConfig = field(default_factory=CacheConfig)
+    rules: RuleConfig = field(default_factory=RuleConfig)
 
 
 def load_config(path: str | Path | None = None) -> AppConfig:
     config_path = Path(path or os.getenv("MYDNS_CONFIG", DEFAULT_CONFIG_PATH))
     if not config_path.exists():
         return AppConfig()
+    config_base_dir = config_path.resolve(strict=False).parent
 
     if yaml is None:
         raise RuntimeError(
@@ -106,6 +115,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         upstreams=_parse_upstreams(raw.get("upstreams")),
         logging=_parse_logging(raw.get("logging")),
         cache=_parse_cache(raw.get("cache")),
+        rules=_parse_rules(raw.get("rules"), root=raw, base_dir=config_base_dir),
     )
     _validate_config(config)
     return config
@@ -148,6 +158,57 @@ def _parse_cache(raw: Any) -> CacheConfig:
     return CacheConfig(
         enabled=_as_bool(raw.get("enabled", True)),
         max_size=int(raw.get("max_size", 10000)),
+    )
+
+
+def _parse_rules(
+    raw: Any,
+    *,
+    root: Mapping[str, Any],
+    base_dir: Path,
+) -> RuleConfig:
+    rules = raw if isinstance(raw, Mapping) else {}
+
+    domainset_value = _first_non_none(
+        rules.get("domainset_dirs"),
+        rules.get("domainset_dir"),
+        rules.get("domainset"),
+        root.get("domainset_dirs"),
+        root.get("domainset_dir"),
+        root.get("domainset"),
+    )
+    ipset_value = _first_non_none(
+        rules.get("ipset_dirs"),
+        rules.get("ipset_dir"),
+        rules.get("ipset"),
+        root.get("ipset_dirs"),
+        root.get("ipset_dir"),
+        root.get("ipset"),
+    )
+    ad_block_value = _first_non_none(
+        rules.get("ad_block_tags"),
+        rules.get("ad_block_tag"),
+        rules.get("ad_block"),
+        root.get("ad_block_tags"),
+        root.get("ad_block_tag"),
+        root.get("ad_block"),
+    )
+
+    return RuleConfig(
+        domainset_dirs=_parse_rule_directories(
+            domainset_value,
+            field_name="rules.domainset_dirs",
+            base_dir=base_dir,
+        ),
+        ipset_dirs=_parse_rule_directories(
+            ipset_value,
+            field_name="rules.ipset_dirs",
+            base_dir=base_dir,
+        ),
+        ad_block_tags=_parse_rule_tags(
+            ad_block_value,
+            field_name="rules.ad_block_tags",
+        ),
     )
 
 
@@ -570,6 +631,88 @@ def _normalize_text_sequence(values: Any) -> tuple[str, ...]:
     return tuple(results)
 
 
+def _parse_rule_directories(
+    value: Any,
+    *,
+    field_name: str,
+    base_dir: Path,
+) -> tuple[str, ...]:
+    raw_value = value
+    if isinstance(raw_value, Mapping):
+        raw_value = _first_non_none(
+            raw_value.get("dirs"),
+            raw_value.get("dir"),
+            raw_value.get("directory"),
+            raw_value.get("path"),
+        )
+    items = _parse_text_items(raw_value, field_name=field_name)
+    if not items:
+        return ()
+    return _resolve_paths(items, base_dir=base_dir)
+
+
+def _parse_rule_tags(
+    value: Any,
+    *,
+    field_name: str,
+) -> tuple[str, ...]:
+    raw_value = value
+    if isinstance(raw_value, Mapping):
+        raw_value = _first_non_none(raw_value.get("tags"), raw_value.get("tag"))
+    return _parse_text_items(raw_value, field_name=field_name)
+
+
+def _parse_text_items(
+    value: Any,
+    *,
+    field_name: str,
+) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, (str, bytes, Path)):
+        raw_items: tuple[Any, ...] = (value,)
+    elif isinstance(value, Sequence):
+        raw_items = tuple(value)
+    else:
+        raise ValueError(f"`{field_name}` must be a string or a list of strings.")
+
+    items: list[str] = []
+    seen: set[str] = set()
+    for raw_item in raw_items:
+        text = _normalize_optional_text(raw_item)
+        if text is None or text in seen:
+            continue
+        seen.add(text)
+        items.append(text)
+    return tuple(items)
+
+
+def _resolve_paths(
+    items: tuple[str, ...],
+    *,
+    base_dir: Path,
+) -> tuple[str, ...]:
+    resolved_items: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        path = Path(item).expanduser()
+        if not path.is_absolute():
+            path = base_dir / path
+        resolved = str(path.resolve(strict=False))
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        resolved_items.append(resolved)
+    return tuple(resolved_items)
+
+
+def _first_non_none(*values: Any) -> Any:
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
 def _is_hostname(host: str) -> bool:
     try:
         ip_address(host)
@@ -585,6 +728,14 @@ def _validate_config(config: AppConfig) -> None:
         raise ValueError("`server.max_packet_size` must be in 12..65535.")
     if config.cache.max_size <= 0:
         raise ValueError("`cache.max_size` must be greater than 0.")
+    _validate_directory_config(
+        directories=config.rules.domainset_dirs,
+        field_name="rules.domainset_dirs",
+    )
+    _validate_directory_config(
+        directories=config.rules.ipset_dirs,
+        field_name="rules.ipset_dirs",
+    )
 
     for upstream in config.upstreams:
         if upstream.protocol not in {"udp", "tcp", "dot", "doh", "doq", "dnscrypt"}:
@@ -618,3 +769,16 @@ def _validate_config(config: AppConfig) -> None:
                     "dnscrypt upstream requires parsed `provider_name` and "
                     "`provider_pk` in final config."
                 )
+
+
+def _validate_directory_config(
+    directories: tuple[str, ...],
+    *,
+    field_name: str,
+) -> None:
+    for directory in directories:
+        path = Path(directory)
+        if not path.exists():
+            raise ValueError(f"`{field_name}` directory does not exist: {directory}")
+        if not path.is_dir():
+            raise ValueError(f"`{field_name}` must contain directory paths: {directory}")

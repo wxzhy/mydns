@@ -4,14 +4,27 @@ from cache.dns_cache import DnsLruCache
 from config import AppConfig
 from core.hooks import RequestHooks
 from core.pipeline import RequestPipeline
-from rules import build_default_hooks
+from logger import get_logger
+from rules import build_hooks
 from selector.resolver_manager import ResolverManager
 from servers.udp_server import UdpDnsServer
+from utils.domainset import DomainSet
+from utils.ipset import IPSet
+
+logger = get_logger(__name__)
 
 
 class Application:
     def __init__(self, config: AppConfig) -> None:
-        hooks = RequestHooks(build_default_hooks())
+        domainset = _load_domainset(config)
+        ipset = _load_ipset(config)
+        hooks = RequestHooks(
+            build_hooks(
+                domainset=domainset,
+                ipset=ipset,
+                ad_block_tags=config.rules.ad_block_tags,
+            )
+        )
         resolver = ResolverManager.from_upstreams(config.upstreams, hooks=hooks)
         dns_cache = (
             DnsLruCache(max_size=config.cache.max_size)
@@ -36,3 +49,31 @@ class Application:
 
     def close(self) -> None:
         self.server.close()
+
+
+def _load_domainset(config: AppConfig) -> DomainSet | None:
+    if not config.rules.domainset_dirs:
+        return None
+    domainset = DomainSet()
+    for directory in config.rules.domainset_dirs:
+        domainset.update_directory(directory)
+    logger.info(
+        "domainset loaded dirs=%s identifiers=%s",
+        len(config.rules.domainset_dirs),
+        ", ".join(domainset.identifiers) or "-",
+    )
+    return domainset
+
+
+def _load_ipset(config: AppConfig) -> IPSet | None:
+    if not config.rules.ipset_dirs:
+        return None
+    ipset = IPSet()
+    for directory in config.rules.ipset_dirs:
+        ipset.update_directory(directory)
+    logger.info(
+        "ipset loaded dirs=%s identifiers=%s",
+        len(config.rules.ipset_dirs),
+        ", ".join(ipset.identifiers) or "-",
+    )
+    return ipset

@@ -166,6 +166,25 @@ class IPSet:
                 matched.update(identifiers)
         return matched
 
+    def match_best(self, target: str) -> str | None:
+        """
+        查询目标 IP/CIDR 的“最精确（最长前缀）”命中标识。
+
+        当同一前缀关联多个标识时，返回排序后第一个，保证结果稳定。
+        """
+        query = _parse_target_to_query(target)
+        if query is None:
+            return None
+        packed, masklen = query
+
+        node = self._radix.search_best(packed=packed, masklen=masklen)
+        if node is None:
+            return None
+        identifiers = node.data.get("identifiers")
+        if not identifiers:
+            return None
+        return sorted(identifiers)[0]
+
     def contains(self, target: str, identifier: str | None = None) -> bool:
         matched = self.match(target)
         if not matched:
