@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import dns.flags
 import dns.message
+import dns.opcode
+import dns.rdataclass
+import dns.rdatatype
 import dns.rcode
 
 from cache.dns_cache import DnsLruCache
@@ -14,6 +17,17 @@ from resolvers.resolver import ResolverProtocol
 from utils.decode_query import decode_query
 
 logger = get_logger(__name__)
+
+# 仅面向常规上网场景支持的查询类型。
+_SUPPORTED_WEB_QTYPES: set[dns.rdatatype.RdataType] = {
+    dns.rdatatype.A,
+    dns.rdatatype.AAAA,
+    dns.rdatatype.HTTPS,
+    dns.rdatatype.SVCB,
+    dns.rdatatype.PTR,  # rDNS
+    dns.rdatatype.TXT,
+    dns.rdatatype.SRV,
+}
 
 
 class RequestPipeline:
@@ -33,18 +47,40 @@ class RequestPipeline:
         self,
         payload: bytes,
         client: ClientAddress,
-    ) -> dns.message.Message | None:
+    ) -> bytes | None:
+        """处理单个 DNS 数据报并返回 wire bytes。"""
         if not payload:
             return None
 
+        # 1) 初始化上下文与基础解码。
         context = QueryContext(client=client)
         query = decode_query(payload, context)
         if query is None:
             return None
         context.raw_query = query
 
+        # 2) 前置校验（协议能力边界）。
+        if _precheck_query(context, query):
+            response_source = "pipeline-query-rejected"
+            context.tags["response_source"] = response_source
+            try:
+                await self._hooks.run_before_response(context)
+            except Exception:
+                logger.exception(
+                    "响应处理 Hook 异常 client=%s:%s txid=%s qtype=%s domain=%s",
+                    context.client_host,
+                    context.client_port,
+                    context.txid if context.txid is not None else "-",
+                    context.query_type or "-",
+                    context.query_name or "-",
+                )
+                context.set_answer(dns.rcode.SERVFAIL)
+                context.tags["response_source"] = "response-hook-error-fallback"
+            return _build_wire_response(context).to_wire()
+
         response_source: str
 
+        # 3) request 阶段与主解析流程。
         try:
             await self._hooks.run_before_upstream(context)
         except Exception:
@@ -98,6 +134,7 @@ class RequestPipeline:
 
         context.tags["response_source"] = response_source
 
+        # 4) response 阶段。
         try:
             await self._hooks.run_before_response(context)
         except Exception:
@@ -113,11 +150,15 @@ class RequestPipeline:
             response_source = "response-hook-error-fallback"
             context.tags["response_source"] = response_source
 
+        # 5) 缓存回填。
         if response_source != "cache-hit":
             self._update_cache(context)
-        return _build_wire_response(context)
+
+        # 6) 将 context 中的抽象响应回填并编码为 bytes。
+        return _build_wire_response(context).to_wire()
 
     def _check_cache(self, context: QueryContext) -> bool:
+        """检查缓存命中并将结果回填到 context。"""
         if self._dns_cache is None:
             return False
         try:
@@ -127,6 +168,7 @@ class RequestPipeline:
             return False
 
     def _update_cache(self, context: QueryContext) -> None:
+        """将当前响应写入缓存。"""
         if self._dns_cache is None:
             return
         try:
@@ -150,3 +192,33 @@ def _build_wire_response(context: QueryContext) -> dns.message.Message:
     if context.answer:
         response.answer = list(context.answer)
     return response
+
+
+def _precheck_query(
+    context: QueryContext,
+    query: dns.message.Message,
+) -> bool:
+    """前置校验查询是否合法，返回 True 表示已拒绝并写入 context。"""
+    if query.opcode() != dns.opcode.QUERY:
+        context.tags["reject_reason"] = "unsupported-opcode"
+        context.set_answer(dns.rcode.NOTIMP)
+        return True
+
+    if len(query.question) != 1:
+        context.tags["reject_reason"] = "invalid-question-count"
+        context.set_answer(dns.rcode.FORMERR)
+        return True
+
+    question = query.question[0]
+    if question.rdclass != dns.rdataclass.IN:
+        context.tags["reject_reason"] = "unsupported-qclass"
+        context.set_answer(dns.rcode.REFUSED)
+        return True
+
+    if question.rdtype not in _SUPPORTED_WEB_QTYPES:
+        context.tags["reject_reason"] = "unsupported-qtype"
+        context.tags["reject_qtype"] = dns.rdatatype.to_text(question.rdtype)
+        context.set_answer(dns.rcode.REFUSED)
+        return True
+
+    return False

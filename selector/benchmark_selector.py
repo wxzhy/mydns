@@ -51,7 +51,7 @@ async def resolve_with_ip_benchmark(
 ) -> BenchmarkSelectResult:
     """并发请求上游，聚合 context 中测速结果并构造最终响应。"""
     if not resolvers:
-        raise ValueError("Resolver 列表不能为空。")
+        raise ValueError("上游解析器列表不能为空。")
 
     started_at = monotonic()
     batch_result = await resolve_all(resolvers=resolvers, context=context)
@@ -79,7 +79,7 @@ async def resolve_with_ip_benchmark(
 
     if not selected_candidates:
         logger.debug(
-            "benchmark_selector 未命中可用测速结果，回退最快NOERROR响应 resolver=%s txid=%s qtype=%s domain=%s",
+            "测速聚合未命中可用结果，回退最快 NOERROR 响应 resolver=%s txid=%s qtype=%s domain=%s",
             base_success.resolver.name,
             context.txid if context.txid is not None else "-",
             context.query_type or "-",
@@ -104,7 +104,7 @@ async def resolve_with_ip_benchmark(
     selected_ips = tuple(item.ip for item in selected_candidates)
     primary = selected_candidates[0]
     logger.debug(
-        "benchmark_selector 选中IP base=%s txid=%s qtype=%s domain=%s ips=%s primary_source=%s primary_rtt=%.2fms",
+        "测速聚合选中 IP base=%s txid=%s qtype=%s domain=%s ips=%s primary_source=%s primary_rtt=%.2fms",
         base_success.resolver.name,
         context.txid if context.txid is not None else "-",
         context.query_type or "-",

@@ -15,7 +15,10 @@ logger = get_logger(__name__)
 
 
 class Application:
+    """应用装配入口：负责串联配置、规则、解析器与服务器。"""
+
     def __init__(self, config: AppConfig) -> None:
+        """根据配置构建运行时组件。"""
         domainset = _load_domainset(config)
         ipset = _load_ipset(config)
         hooks = RequestHooks(
@@ -46,20 +49,23 @@ class Application:
         )
 
     async def start(self) -> None:
+        """启动网络服务。"""
         await self.server.start()
 
     def close(self) -> None:
+        """关闭网络服务。"""
         self.server.close()
 
 
 def _load_domainset(config: AppConfig) -> DomainSet | None:
+    """按配置加载域名规则集。"""
     if not config.rules.domainset_dirs:
         return None
     domainset = DomainSet()
     for directory in config.rules.domainset_dirs:
         domainset.update_directory(directory)
     logger.info(
-        "domainset loaded dirs=%s identifiers=%s",
+        "已加载 domainset：目录数=%s 标识=%s",
         len(config.rules.domainset_dirs),
         ", ".join(domainset.identifiers) or "-",
     )
@@ -67,13 +73,14 @@ def _load_domainset(config: AppConfig) -> DomainSet | None:
 
 
 def _load_ipset(config: AppConfig) -> IPSet | None:
+    """按配置加载客户端 IP 规则集。"""
     if not config.rules.ipset_dirs:
         return None
     ipset = IPSet()
     for directory in config.rules.ipset_dirs:
         ipset.update_directory(directory)
     logger.info(
-        "ipset loaded dirs=%s identifiers=%s",
+        "已加载 ipset：目录数=%s 标识=%s",
         len(config.rules.ipset_dirs),
         ", ".join(ipset.identifiers) or "-",
     )

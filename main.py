@@ -15,17 +15,19 @@ except Exception:  # pragma: no cover
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Simple UDP DNS Forwarder")
+    """解析命令行参数。"""
+    parser = argparse.ArgumentParser(description="轻量级 UDP DNS 转发服务")
     parser.add_argument(
         "-c",
         "--config",
         default=None,
-        help="Path to YAML config file (default: ./config.yaml).",
+        help="YAML 配置文件路径（默认：./config.yaml）。",
     )
     return parser.parse_args()
 
 
 async def run(config_path: str | None) -> None:
+    """加载配置并运行应用主循环。"""
     config = load_config(config_path)
     setup_logging(config.logging.level)
     logger = get_logger(__name__)
@@ -34,7 +36,7 @@ async def run(config_path: str | None) -> None:
     await app.start()
 
     logger.info(
-        "Forwarding to upstreams: %s",
+        "当前上游转发目标：%s",
         ", ".join(
             f"[{up.tag}] {up.protocol}://{up.host}:{up.port}"
             for up in config.upstreams
@@ -59,6 +61,7 @@ async def run(config_path: str | None) -> None:
 
 
 def main() -> None:
+    """程序入口。"""
     args = parse_args()
     if winuvloop is not None:
         try:

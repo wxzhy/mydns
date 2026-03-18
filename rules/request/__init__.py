@@ -3,7 +3,6 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from ipaddress import ip_address
 
-import dns.message
 import dns.opcode
 import dns.rcode
 import dns.rdataclass
@@ -141,6 +140,11 @@ class RequestDebugHook(RequestHook):
 
 class RequestSanityDropHook(RequestHook):
     """
+    兼容旧实现的请求合法性校验 Hook。
+
+    注意：当前主流程已在 pipeline 前置校验 opcode/qclass。
+    该 Hook 默认不再注入，仅保留兼容导入。
+
     请求基础合法性校验：
     - 仅允许标准 QUERY opcode
     - 仅允许 IN qclass
@@ -252,7 +256,6 @@ def build_request_hooks(
 
     if enable_debug:
         hooks.append(RequestDebugHook())
-    hooks.append(RequestSanityDropHook())
     hooks.append(IpBenchmarkTopNHook(top_n=ip_benchmark_top_n))
     if domainset is not None:
         hooks.append(DomainSetRouteHook(domainset=domainset))

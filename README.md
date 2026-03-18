@@ -15,6 +15,9 @@
   - 请求阶段：`before_upstream`
   - 上游阶段：`after_upstream`
   - 响应阶段：`before_response`
+- pipeline 前置查询校验：仅接收常规上网环境查询
+  - 仅允许 `QUERY` opcode、`IN` qclass、单问题请求
+  - 默认支持 `A/AAAA/HTTPS/SVCB/PTR/TXT/SRV`
 - 清晰分层：`server -> pipeline -> resolver`
 - 基于 YAML 的配置，带默认值
 

@@ -47,7 +47,7 @@ async def resolve_fastest(
 ) -> ResolverRaceResult:
     """并发请求所有 resolver，返回首个 NOERROR 成功结果。"""
     if not resolvers:
-        raise ValueError("Resolver 列表不能为空。")
+        raise ValueError("上游解析器列表不能为空。")
 
     started_at = monotonic()
     tasks: dict[asyncio.Task[DnsAnswer], ResolverProtocol] = {
@@ -102,7 +102,7 @@ async def resolve_all(
 ) -> ResolverBatchResult:
     """并发请求全部 resolver，收集所有成功响应。"""
     if not resolvers:
-        raise ValueError("Resolver 列表不能为空。")
+        raise ValueError("上游解析器列表不能为空。")
 
     async def _call_one(
         resolver: ResolverProtocol,
@@ -125,7 +125,7 @@ async def resolve_all(
                 errors.append(f"{resolver.name}: {error}")
                 continue
             if result is None:  # pragma: no cover
-                errors.append(f"{resolver.name}: empty response")
+                errors.append(f"{resolver.name}: 空响应")
                 continue
             rcode, answer = result
             successes.append(

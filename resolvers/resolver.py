@@ -65,9 +65,10 @@ class BaseUpstreamResolver(ABC):
         return self._tag
 
     async def resolve(self, context: QueryContext) -> DnsAnswer:
+        """执行一次上游查询并触发 upstream 阶段 hook。"""
         query = context.raw_query
         if query is None:
-            raise ValueError("QueryContext.raw_query 不能为空。")
+            raise ValueError("查询上下文中的 raw_query 不能为空。")
         started_at = monotonic()
         try:
             upstream_query = self._build_upstream_query(query)
@@ -105,6 +106,7 @@ class BaseUpstreamResolver(ABC):
         """具体上游查询实现。"""
 
     def mark_success(self, rtt_ms: float) -> None:
+        """记录成功统计并更新平均时延。"""
         self._success_count += 1
         self._last_rtt_ms = rtt_ms
         if self._avg_rtt_ms is None:
@@ -116,9 +118,11 @@ class BaseUpstreamResolver(ABC):
         ) / self._success_count
 
     def mark_failure(self) -> None:
+        """记录失败次数。"""
         self._failure_count += 1
 
     def stats_snapshot(self) -> dict[str, float | int | None]:
+        """返回当前 resolver 的统计快照。"""
         return {
             "success_count": self._success_count,
             "failure_count": self._failure_count,
@@ -127,6 +131,7 @@ class BaseUpstreamResolver(ABC):
         }
 
     def _build_upstream_query(self, query: dns.message.Message) -> dns.message.Message:
+        """按配置注入 ECS，构造要发往上游的查询报文副本。"""
         if self._ecs_option is None:
             return query
 

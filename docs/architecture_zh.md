@@ -28,6 +28,17 @@
 - `after_upstream(context, rcode, answer, resolver_name)`：每个上游返回后的副作用处理（日志、测速、改写）
 - `before_response(context)`：最终响应出站前处理
 
+### 前置准入校验（pipeline 内置）
+
+在进入 hook 与上游解析前，pipeline 会做基础准入：
+
+- 仅允许 `QUERY` opcode
+- 仅允许 `IN` qclass
+- 仅允许单问题（`len(question) == 1`）
+- 仅允许常规上网查询类型：`A/AAAA/HTTPS/SVCB/PTR/TXT/SRV`
+
+不满足时直接返回拒绝结果（`NOTIMP` / `FORMERR` / `REFUSED`）。
+
 ## 4. 上游并发与 A/AAAA 策略
 
 `ResolverManager` 会并发请求符合 tag 的 resolver：

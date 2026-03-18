@@ -109,7 +109,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         raw = yaml.safe_load(f) or {}
 
     if not isinstance(raw, Mapping):
-        raise ValueError("Config root must be a mapping.")
+        raise ValueError("配置文件根节点必须是映射（mapping）类型。")
 
     config = AppConfig(
         server=_parse_server(raw.get("server")),
@@ -136,14 +136,14 @@ def _parse_upstreams(raw: Any) -> tuple[UpstreamConfig, ...]:
     if raw is None:
         return _default_upstreams()
     if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
-        raise ValueError("`upstreams` must be a list.")
+        raise ValueError("`upstreams` 必须是列表。")
 
     upstreams: list[UpstreamConfig] = []
     for index, item in enumerate(raw):
         upstreams.append(_parse_upstream_item(index=index, item=item))
 
     if not upstreams:
-        raise ValueError("At least one upstream DNS server is required.")
+        raise ValueError("至少需要配置一个上游 DNS 服务器。")
     return tuple(upstreams)
 
 
@@ -252,7 +252,7 @@ def _parse_upstream_item(index: int, item: Any) -> UpstreamConfig:
     if isinstance(item, str):
         raw_text = item.strip()
         if not raw_text:
-            raise ValueError(f"`upstreams[{index}]` is empty.")
+            raise ValueError(f"`upstreams[{index}]` 不能为空。")
         if raw_text.startswith("sdns://") or "://" in raw_text:
             mapping: Mapping[str, Any] = {"target": raw_text}
         else:
@@ -261,7 +261,7 @@ def _parse_upstream_item(index: int, item: Any) -> UpstreamConfig:
         mapping = item
     else:
         raise ValueError(
-            f"`upstreams[{index}]` must be a mapping or a string (URL/stamp/host)."
+            f"`upstreams[{index}]` 必须是映射或字符串（URL/stamp/host）。"
         )
 
     return _build_upstream_config(index=index, item=mapping)
@@ -286,7 +286,7 @@ def _build_upstream_config(index: int, item: Mapping[str, Any]) -> UpstreamConfi
     try:
         parsed_ecs = _parse_ecs(raw_ecs)
     except ValueError as exc:
-        raise ValueError(f"`upstreams[{index}].ecs` is invalid: {raw_ecs}") from exc
+        raise ValueError(f"`upstreams[{index}].ecs` 非法：{raw_ecs}") from exc
 
     raw_hostname = item.get("hostname", item.get("sni", base.get("hostname")))
     raw_http_host = item.get(
@@ -322,7 +322,7 @@ def _build_upstream_config(index: int, item: Mapping[str, Any]) -> UpstreamConfi
     )
 
     if not host:
-        raise ValueError(f"`upstreams[{index}].host` (or `address`) is required.")
+        raise ValueError(f"`upstreams[{index}].host`（或 `address`）为必填项。")
 
     return UpstreamConfig(
         host=host,
@@ -380,7 +380,7 @@ def _parse_stamp_to_base(index: int, stamp: str) -> dict[str, Any]:
     try:
         parameter = dnsstamps.parse(stamp)
     except Exception as exc:  # pragma: no cover
-        raise ValueError(f"`upstreams[{index}].stamp` parse failed: {exc}") from exc
+        raise ValueError(f"`upstreams[{index}].stamp` 解析失败：{exc}") from exc
 
     protocol = parameter.protocol
     if protocol == StampProtocol.PLAIN:
@@ -446,11 +446,11 @@ def _parse_stamp_to_base(index: int, stamp: str) -> dict[str, Any]:
         provider_pk = _normalize_optional_text(parameter.public_key)
         if not host:
             raise ValueError(
-                f"`upstreams[{index}].stamp` dnscrypt address is empty."
+                f"`upstreams[{index}].stamp` 的 dnscrypt 地址为空。"
             )
         if not provider_name or not provider_pk:
             raise ValueError(
-                f"`upstreams[{index}].stamp` dnscrypt provider fields are incomplete."
+                f"`upstreams[{index}].stamp` 的 dnscrypt provider 字段不完整。"
             )
         return {
             "protocol": "dnscrypt",
@@ -462,7 +462,7 @@ def _parse_stamp_to_base(index: int, stamp: str) -> dict[str, Any]:
         }
 
     raise ValueError(
-        f"`upstreams[{index}].stamp` contains unsupported protocol: {protocol}"
+        f"`upstreams[{index}].stamp` 包含不支持的协议：{protocol}"
     )
 
 
@@ -489,18 +489,18 @@ def _parse_url_to_base(index: int, target: str) -> dict[str, Any]:
     try:
         parsed = URL(target)
     except Exception as exc:  # pragma: no cover
-        raise ValueError(f"`upstreams[{index}]` URL parse failed: {exc}") from exc
+        raise ValueError(f"`upstreams[{index}]` URL 解析失败：{exc}") from exc
 
     scheme = _normalize_optional_text(parsed.scheme)
     protocol = _protocol_from_scheme(scheme or "")
     if protocol is None:
         raise ValueError(
-            f"`upstreams[{index}]` URL scheme `{scheme}` is not supported."
+            f"`upstreams[{index}]` 的 URL 协议 `{scheme}` 不受支持。"
         )
 
     host = _normalize_optional_text(parsed.host)
     if host is None:
-        raise ValueError(f"`upstreams[{index}]` URL must include host: {target}")
+        raise ValueError(f"`upstreams[{index}]` 的 URL 必须包含 host：{target}")
 
     port = parsed.port or _default_port_for_protocol(protocol)
     base: dict[str, Any] = {
@@ -574,13 +574,13 @@ def _split_host_port(address: str, *, default_port: int) -> tuple[str, int]:
     if text.startswith("["):
         right = text.find("]")
         if right <= 1:
-            raise ValueError(f"Invalid IPv6 address: {address}")
+            raise ValueError(f"IPv6 地址格式非法：{address}")
         host = text[1:right]
         rest = text[right + 1 :]
         if not rest:
             return host, default_port
         if not rest.startswith(":"):
-            raise ValueError(f"Invalid address format: {address}")
+            raise ValueError(f"地址格式非法：{address}")
         return host, _parse_port(rest[1:], default_port=default_port)
 
     if text.count(":") == 1:
@@ -596,7 +596,7 @@ def _parse_port(value: str, *, default_port: int) -> int:
         return default_port
     port = int(value)
     if not (1 <= port <= 65535):
-        raise ValueError(f"Invalid port: {port}")
+        raise ValueError(f"端口非法：{port}")
     return port
 
 
@@ -684,7 +684,7 @@ def _parse_text_items(
     elif isinstance(value, Sequence):
         raw_items = tuple(value)
     else:
-        raise ValueError(f"`{field_name}` must be a string or a list of strings.")
+        raise ValueError(f"`{field_name}` 必须是字符串或字符串列表。")
 
     items: list[str] = []
     seen: set[str] = set()
@@ -708,9 +708,9 @@ def _parse_positive_int(
     try:
         parsed = int(value)
     except (TypeError, ValueError) as exc:
-        raise ValueError(f"`{field_name}` must be a positive integer.") from exc
+        raise ValueError(f"`{field_name}` 必须是正整数。") from exc
     if parsed <= 0:
-        raise ValueError(f"`{field_name}` must be greater than 0.")
+        raise ValueError(f"`{field_name}` 必须大于 0。")
     return parsed
 
 
@@ -750,13 +750,13 @@ def _is_hostname(host: str) -> bool:
 
 def _validate_config(config: AppConfig) -> None:
     if not (1 <= config.server.port <= 65535):
-        raise ValueError("`server.port` must be in 1..65535.")
+        raise ValueError("`server.port` 必须在 1..65535 范围内。")
     if not (12 <= config.server.max_packet_size <= 65535):
-        raise ValueError("`server.max_packet_size` must be in 12..65535.")
+        raise ValueError("`server.max_packet_size` 必须在 12..65535 范围内。")
     if config.cache.max_size <= 0:
-        raise ValueError("`cache.max_size` must be greater than 0.")
+        raise ValueError("`cache.max_size` 必须大于 0。")
     if config.rules.ip_benchmark_top_n <= 0:
-        raise ValueError("`rules.ip_benchmark_top_n` must be greater than 0.")
+        raise ValueError("`rules.ip_benchmark_top_n` 必须大于 0。")
     _validate_directory_config(
         directories=config.rules.domainset_dirs,
         field_name="rules.domainset_dirs",
@@ -769,34 +769,34 @@ def _validate_config(config: AppConfig) -> None:
     for upstream in config.upstreams:
         if upstream.protocol not in {"udp", "tcp", "dot", "doh", "doq", "dnscrypt"}:
             raise ValueError(
-                f"Unsupported upstream protocol `{upstream.protocol}` for {upstream.host}."
+                f"上游 {upstream.host} 使用了不支持的协议 `{upstream.protocol}`。"
             )
         if not upstream.host:
-            raise ValueError(f"Upstream host is required for protocol {upstream.protocol}.")
+            raise ValueError(f"协议 {upstream.protocol} 的上游配置缺少 host。")
         if not (1 <= upstream.port <= 65535):
             raise ValueError(
-                f"Invalid upstream port for {upstream.protocol}://{upstream.host}."
+                f"上游端口非法：{upstream.protocol}://{upstream.host}:{upstream.port}"
             )
         if upstream.timeout <= 0:
-            raise ValueError(f"Timeout must be positive for {upstream.host}.")
+            raise ValueError(f"上游 {upstream.host} 的 timeout 必须为正数。")
         if upstream.ecs is not None:
             try:
                 ip_network(upstream.ecs, strict=False)
             except ValueError as exc:
                 raise ValueError(
-                    f"Invalid ECS subnet for {upstream.host}: {upstream.ecs}"
+                    f"上游 {upstream.host} 的 ECS 网段非法：{upstream.ecs}"
                 ) from exc
         if upstream.protocol == "doh" and not upstream.path.startswith("/"):
-            raise ValueError(f"Invalid DoH path for {upstream.host}: {upstream.path}")
+            raise ValueError(f"上游 {upstream.host} 的 DoH 路径非法：{upstream.path}")
         if not upstream.tag.strip():
             raise ValueError(
-                f"Invalid upstream tag for {upstream.protocol}://{upstream.host}."
+                f"上游 {upstream.protocol}://{upstream.host} 的 tag 非法。"
             )
         if upstream.protocol == "dnscrypt":
             if not upstream.provider_name or not upstream.provider_pk:
                 raise ValueError(
-                    "dnscrypt upstream requires parsed `provider_name` and "
-                    "`provider_pk` in final config."
+                    "dnscrypt 上游必须在最终配置中包含解析后的 "
+                    "`provider_name` 与 `provider_pk`。"
                 )
 
 
@@ -808,6 +808,6 @@ def _validate_directory_config(
     for directory in directories:
         path = Path(directory)
         if not path.exists():
-            raise ValueError(f"`{field_name}` directory does not exist: {directory}")
+            raise ValueError(f"`{field_name}` 目录不存在：{directory}")
         if not path.is_dir():
-            raise ValueError(f"`{field_name}` must contain directory paths: {directory}")
+            raise ValueError(f"`{field_name}` 必须是目录路径：{directory}")

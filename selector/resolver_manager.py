@@ -47,7 +47,7 @@ class ResolverManager:
         }
         default_table = self._resolver_groups.get(DEFAULT_TAG, {})
         if not default_table:
-            raise ValueError("ResolverManager 至少需要一个 default 组 resolver。")
+            raise ValueError("ResolverManager 至少需要一个 default 分组的解析器。")
 
     @property
     def name(self) -> str:
@@ -66,7 +66,7 @@ class ResolverManager:
             resolver_type = RESOLVER_BY_PROTOCOL.get(upstream.protocol)
             if resolver_type is None:
                 raise ValueError(
-                    f"Unsupported upstream protocol `{upstream.protocol}` for {upstream.host}."
+                    f"上游 {upstream.host} 使用了不支持的协议 `{upstream.protocol}`。"
                 )
 
             resolver = resolver_type(upstream, hooks=hooks)
@@ -94,6 +94,7 @@ class ResolverManager:
         return {tag: dict(table) for tag, table in self._resolver_groups.items()}
 
     def stats_snapshot(self) -> dict[str, float | int | None]:
+        """与单 resolver 结构保持一致的占位统计。"""
         return {
             "success_count": None,
             "failure_count": None,
@@ -123,6 +124,7 @@ class ResolverManager:
         return stats
 
     async def resolve(self, context: QueryContext) -> DnsAnswer:
+        """按请求上下文选择分组并执行解析。"""
         started_at = monotonic()
         requested_tag, selected_tag, resolvers = self._pick_resolvers_by_context(
             context
@@ -158,6 +160,7 @@ class ResolverManager:
         self,
         context: QueryContext,
     ) -> tuple[str, str, tuple[ResolverProtocol, ...]]:
+        """根据 context.tag 选择 resolver 分组，必要时回退 default。"""
         requested_tag = (context.tag or DEFAULT_TAG).strip() or DEFAULT_TAG
         selected_tag = requested_tag
 
@@ -166,7 +169,7 @@ class ResolverManager:
             selected_tag = DEFAULT_TAG
             table = self._resolver_groups[DEFAULT_TAG]
             logger.warning(
-                "resolver 分组不存在，回退 default requested_tag=%s txid=%s qname=%s qtype=%s",
+                "解析分组不存在，回退到 default。requested_tag=%s txid=%s qname=%s qtype=%s",
                 requested_tag,
                 context.txid if context.txid is not None else "-",
                 context.query_name or "-",
@@ -181,6 +184,7 @@ class ResolverManager:
         started_at: float,
         resolvers: Sequence[ResolverProtocol],
     ) -> DnsAnswer:
+        """A/AAAA 请求：并发解析并结合测速选择响应。"""
         try:
             benchmark_result = await resolve_with_ip_benchmark(
                 resolvers=resolvers,
@@ -242,13 +246,14 @@ class ResolverManager:
         started_at: float,
         resolver: ResolverProtocol,
     ) -> DnsAnswer:
+        """仅一个 resolver 时的直接解析路径。"""
         try:
             rcode, answer = await resolver.resolve(context)
         except Exception as exc:  # pragma: no cover
             context.resolve_rtt_ms = (monotonic() - started_at) * 1000
             context.resolver_errors = [f"{resolver.name}: {exc}"]
             logger.error(
-                "Resolver 解析失败 resolver=%s txid=%s qname=%s qtype=%s error=%s",
+                "上游解析器失败 resolver=%s txid=%s qname=%s qtype=%s error=%s",
                 resolver.name,
                 context.txid if context.txid is not None else "-",
                 context.query_name or "-",
@@ -273,6 +278,7 @@ class ResolverManager:
         started_at: float,
         resolvers: Sequence[ResolverProtocol],
     ) -> DnsAnswer:
+        """多 resolver 并发竞速，取首个可用结果。"""
         try:
             race_result = await resolve_fastest(resolvers=resolvers, context=context)
         except Exception as exc:  # pragma: no cover
@@ -309,10 +315,12 @@ class ResolverManager:
 
 
 def _make_servfail() -> DnsAnswer:
+    """统一 SERVFAIL 回退结果。"""
     return dns.rcode.SERVFAIL, []
 
 
 def _build_resolver_key(index: int, resolver: ResolverProtocol) -> str:
+    """构造 resolver 在分组表中的稳定键名。"""
     return f"upstream-{index + 1}@{resolver.name}"
 
 
@@ -321,6 +329,7 @@ def _insert_resolver(
     key: str,
     resolver: ResolverProtocol,
 ) -> None:
+    """将 resolver 写入表中，必要时自动追加序号避免冲突。"""
     candidate = key
     suffix = 2
     while candidate in table:
@@ -330,5 +339,6 @@ def _insert_resolver(
 
 
 def _should_enable_ip_benchmark(context: QueryContext) -> bool:
+    """仅 A/AAAA 查询启用 IP 测速聚合。"""
     qtype = (context.query_type or "").strip().upper()
     return qtype in ("A", "AAAA")

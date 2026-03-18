@@ -156,7 +156,7 @@ async def choose_fastest_ip(
             "; ".join(errors),
         )
     else:
-        logger.debug("IP 测速无可用结果 ips=%s", ", ".join(unique_ips))
+        logger.debug("IP 测速无可用结果，候选=%s", ", ".join(unique_ips))
     return None
 
 

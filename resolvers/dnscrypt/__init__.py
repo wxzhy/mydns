@@ -44,19 +44,19 @@ def normalize_provider_public_key(value: str | bytes) -> bytes:
         try:
             text = value.decode("ascii", errors="strict")
         except UnicodeDecodeError as exc:
-            raise DnscryptError("provider 公钥必须是 32 字节原始值或十六进制文本。") from exc
+            raise DnscryptError("提供方公钥必须是 32 字节原始值或十六进制文本。") from exc
     else:
         text = value
 
     normalized = text.strip().replace(":", "").replace(" ", "")
     if not normalized:
-        raise DnscryptError("provider 公钥为空。")
+        raise DnscryptError("提供方公钥为空。")
     try:
         decoded = binascii.unhexlify(normalized)
     except binascii.Error as exc:
-        raise DnscryptError("provider 公钥十六进制格式不合法。") from exc
+        raise DnscryptError("提供方公钥十六进制格式不合法。") from exc
     if len(decoded) != 32:
-        raise DnscryptError(f"provider 公钥长度错误: {len(decoded)}，期望 32 字节。")
+        raise DnscryptError(f"提供方公钥长度错误：{len(decoded)}，期望 32 字节。")
     return decoded
 
 
@@ -84,8 +84,8 @@ class Resolver:
 
         if not private_key:
             self.private: PrivateKey = PrivateKey.generate()
-            logging.info("Private Key: %s", self.private.encode(HexEncoder))
-            logging.info("Public Key : %s", self.private.public_key.encode(HexEncoder))
+            logging.info("私钥：%s", self.private.encode(HexEncoder))
+            logging.info("公钥：%s", self.private.public_key.encode(HexEncoder))
         else:
             self.private = PrivateKey(private_key, HexEncoder)
 
@@ -104,7 +104,7 @@ class Resolver:
                 fp = b"".join(answer.response.answer[0][0].strings)
                 return VerifyKey(normalize_provider_public_key(fp))
             except Exception as exc:
-                raise TypeError(f"No valid public key for {provider_name}") from exc
+                raise TypeError(f"{provider_name} 没有可用的公钥记录。") from exc
 
     def _bootstrap(self, verify_key: VerifyKey) -> None:
         question = dns.message.make_query(self._provider_name, rdtype=dns.rdatatype.TXT)
@@ -123,7 +123,7 @@ class Resolver:
                     timeout=self.timeout,
                 )
         except Timeout:
-            logging.debug("DNSCrypt certificate query failed over UDP, falling back to TCP")
+            logging.debug("DNSCrypt 证书通过 UDP 查询失败，回退到 TCP。")
             self.tcp_only = True
             answer = dns.query.tcp(
                 question,
@@ -135,10 +135,10 @@ class Resolver:
         self._load_certificate(answer=answer, verify_key=verify_key)
         if not self.publickey:
             raise TypeError(
-                "No valid certificate found for "
+                "未找到可用证书："
                 f"{self.address}:{self.port} ({self._provider_name})"
             )
-        logging.info("Selected certificate %s", self.serial)
+        logging.info("已选择证书序列号 %s", self.serial)
 
     def _load_certificate(self, answer: dns.message.Message, verify_key: VerifyKey) -> None:
         now = time()
@@ -150,22 +150,22 @@ class Resolver:
                 if len(cert_blob) <= 8:
                     continue
 
-                logging.debug("Possible cert %s", cert_blob.hex())
+                logging.debug("候选证书 %s", cert_blob.hex())
                 magic, es_version, _minor_version, signed = struct.unpack(
                     f"!4sHH{len(cert_blob) - 8}s",
                     cert_blob,
                 )
                 if magic != DNSCRYPT_CERT_MAGIC:
-                    logging.warning("Bad certificate magic: %s", magic)
+                    logging.warning("证书魔数不匹配：%s", magic)
                     continue
                 if es_version != 1:
-                    logging.warning("Not using es_version 1")
+                    logging.warning("证书版本不是 es_version=1")
                     continue
 
                 try:
                     data = verify_key.verify(signed)
                 except BadSignatureError:
-                    logging.warning("Signature did not match")
+                    logging.warning("证书签名校验失败")
                     continue
 
                 if len(data) < 52:
@@ -175,10 +175,10 @@ class Resolver:
                     data,
                 )
                 if start > now:
-                    logging.warning("Certification not yet valid: %s", start)
+                    logging.warning("证书尚未生效：%s", start)
                     continue
                 if expire < now:
-                    logging.warning("Certificate expired %s", expire)
+                    logging.warning("证书已过期：%s", expire)
                     continue
                 if self.serial is None or serial > self.serial:
                     self.publickey = PublicKey(pk)
@@ -263,7 +263,7 @@ class Resolver:
 
     def _encrypt_query(self, query: QueryMessage) -> bytes:
         if not self.client_magic:
-            raise DnscryptError("DNSCrypt client not initialized with certificate.")
+            raise DnscryptError("DNSCrypt 客户端尚未完成证书初始化。")
 
         message = _pad_query(query.to_wire())
         nonce = random(DNSCRYPT_NONCE_SIZE)
@@ -274,11 +274,11 @@ class Resolver:
 
     def _decrypt_response(self, wire: bytes, one_rr_per_rrset: bool) -> dns.message.Message:
         if len(wire) <= 32:
-            raise TypeError("Invalid DNSCrypt response size")
+            raise TypeError("DNSCrypt 响应报文长度非法。")
 
         magic, nonce, data = struct.unpack(f"!8s24s{len(wire) - 32}s", wire)
         if magic != DNSCRYPT_RESOLVER_MAGIC:
-            raise TypeError("This does not appear to be DNSCrypt")
+            raise TypeError("该响应看起来不是 DNSCrypt 报文。")
 
         payload = self._secretbox.decrypt(data, nonce)
         return dns.message.from_wire(
@@ -366,7 +366,7 @@ class Resolver:
                     break
                 if not ignore_unexpected:
                     raise dns.query.UnexpectedSource(
-                        f"got a response from {from_address} instead of {destination}"
+                        f"收到的响应来源 {from_address} 与目标 {destination} 不一致"
                     )
         finally:
             response_time = 0 if begin_time is None else time() - begin_time

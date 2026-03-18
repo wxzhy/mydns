@@ -11,11 +11,12 @@ logger = get_logger(__name__)
 
 
 def decode_query(payload: bytes, context: QueryContext) -> dns.message.Message | None:
+    """解码 DNS 查询并将核心字段写入 QueryContext。"""
     try:
         query = dns.message.from_wire(payload)
     except Exception:
         logger.warning(
-            "Invalid DNS datagram dropped from %s:%s",
+            "丢弃非法 DNS 数据报，来源 %s:%s",
             context.client_host,
             context.client_port,
         )
@@ -32,6 +33,7 @@ def decode_query(payload: bytes, context: QueryContext) -> dns.message.Message |
 
 
 def _extract_ecs(query: dns.message.Message) -> str | None:
+    """提取请求中的 ECS 字段（若存在）。"""
     for option in query.options:
         if isinstance(option, dns.edns.ECSOption):
             return f"{option.address}/{option.srclen}"
