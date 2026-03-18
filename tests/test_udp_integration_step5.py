@@ -11,9 +11,9 @@ import dns.rcode
 import dns.rdatatype
 import dns.rrset
 
-from core.hooks import Resolver
 from core.models import Answer, Query
 from core.pipeline import Pipeline
+from resolver.resolver import Resolver
 from server.udp_server import UDPDNSServer
 
 

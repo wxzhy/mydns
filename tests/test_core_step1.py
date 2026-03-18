@@ -9,8 +9,9 @@ import dns.rcode
 import dns.rdatatype
 
 from core.context import QueryContext
-from core.hooks import RequestHook, Resolver, ResolverHook, ResponseHook
+from core.hooks import RequestHook, ResolverHook, ResponseHook
 from core.models import Answer, Query, ResolverResult
+from resolver.resolver import Resolver
 
 
 class _DummyRequestHook(RequestHook):
@@ -45,7 +46,7 @@ class _DummyResolver(Resolver):
 class TestCoreStep1(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.query = Query(
-            client_addr=("127.0.0.1", 5353),
+            client_addr=("127.0.0.1", 5335),
             qname=dns.name.from_text("example.com."),
             qtype=dns.rdatatype.A,
         )

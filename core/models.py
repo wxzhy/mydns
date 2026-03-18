@@ -8,6 +8,7 @@ import dns.edns
 import dns.name
 import dns.rdatatype
 import dns.rrset
+import dns.rcode
 
 
 @dataclass(slots=True)
@@ -15,6 +16,7 @@ class Query:
     """DNS 请求抽象。"""
 
     client_addr: tuple[str, int] | None
+    txid: int
     qname: dns.name.Name
     qtype: dns.rdatatype.RdataType
     ecs: dns.edns.ECSOption | None = None
@@ -24,7 +26,7 @@ class Query:
 class Answer:
     """DNS 响应抽象。"""
 
-    rcode: int
+    rcode: dns.rcode.Rcode
     rrsets: list[dns.rrset.RRset] = field(default_factory=list)
 
 

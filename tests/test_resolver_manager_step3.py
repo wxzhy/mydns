@@ -13,7 +13,7 @@ import dns.rdatatype
 from core.context import QueryContext
 from core.hooks import Resolver, ResolverHook
 from core.models import Answer, Query, ResolverResult
-from core.resolver_manager import ResolverManager
+from upstream.resolver_manager import ResolverManager
 
 
 class _SleepResolver(Resolver):
@@ -66,7 +66,7 @@ class _RewriteRcodeHook(ResolverHook):
 class TestResolverManagerStep3(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         query = Query(
-            client_addr=("127.0.0.1", 5353),
+            client_addr=("127.0.0.1", 5335),
             qname=dns.name.from_text("example.com."),
             qtype=dns.rdatatype.A,
         )

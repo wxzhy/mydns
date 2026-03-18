@@ -2,7 +2,7 @@
 
 server:
   host: 127.0.0.1
-  port: 5353
+  port: 5335
 
 pipeline:
   upstream_timeout_s: 0.8

@@ -5,8 +5,8 @@ from __future__ import annotations
 import dns.asyncquery
 import dns.message
 
-from core.hooks import Resolver
 from core.models import Answer, Query
+from resolver.resolver import Resolver
 
 
 class UdpUpstreamResolver(Resolver):

@@ -11,12 +11,12 @@ import dns.rrset
 
 from core.context import QueryContext
 from core.models import Answer, Query, ResolverResult
-from core.selector import select_best_answer
+from upstream.selector import select_best_answer
 
 
 def _make_query(qtype: dns.rdatatype.RdataType) -> Query:
     return Query(
-        client_addr=("127.0.0.1", 5353),
+        client_addr=("127.0.0.1", 5335),
         qname=dns.name.from_text("www.example.com."),
         qtype=qtype,
     )
@@ -64,7 +64,10 @@ class TestSelectorStep4(unittest.TestCase):
 
         answer = select_best_answer(ctx)
         self.assertEqual(answer.rcode, dns.rcode.NOERROR)
-        self.assertEqual([x.rdtype for x in answer.rrsets], [dns.rdatatype.CNAME, dns.rdatatype.CNAME, dns.rdatatype.A])
+        self.assertEqual(
+            [x.rdtype for x in answer.rrsets],
+            [dns.rdatatype.CNAME, dns.rdatatype.CNAME, dns.rdatatype.A],
+        )
 
         a_rrset = answer.rrsets[-1]
         ips = {rdata.to_text() for rdata in a_rrset}
@@ -87,11 +90,11 @@ class TestSelectorStep4(unittest.TestCase):
     def test_non_a_type_fastest_success_passthrough(self) -> None:
         txt_slow = Answer(
             rcode=dns.rcode.NOERROR,
-            rrsets=[dns.rrset.from_text("example.com.", 60, "IN", "TXT", "\"slow\"")],
+            rrsets=[dns.rrset.from_text("example.com.", 60, "IN", "TXT", '"slow"')],
         )
         txt_fast = Answer(
             rcode=dns.rcode.NOERROR,
-            rrsets=[dns.rrset.from_text("example.com.", 60, "IN", "TXT", "\"fast\"")],
+            rrsets=[dns.rrset.from_text("example.com.", 60, "IN", "TXT", '"fast"')],
         )
         nxdomain = Answer(rcode=dns.rcode.NXDOMAIN, rrsets=[])
 
@@ -103,7 +106,7 @@ class TestSelectorStep4(unittest.TestCase):
         ]
 
         answer = select_best_answer(ctx)
-        self.assertEqual(answer.rrsets[0][0].to_text(), "\"fast\"")
+        self.assertEqual(answer.rrsets[0][0].to_text(), '"fast"')
 
 
 if __name__ == "__main__":

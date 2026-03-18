@@ -5,7 +5,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 
 from core.context import QueryContext
-from core.models import Answer, Query, ResolverResult
+from core.models import ResolverResult
 
 
 class RequestHook(ABC):
@@ -34,14 +34,3 @@ class ResponseHook(ABC):
     @abstractmethod
     async def on_response(self, ctx: QueryContext) -> None:
         """处理最终响应。"""
-
-
-class Resolver(ABC):
-    """上游解析器接口。"""
-
-    name: str
-    tags: set[str]
-
-    @abstractmethod
-    async def resolve(self, query: Query, timeout_s: float) -> Answer:
-        """对查询执行解析。"""

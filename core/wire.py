@@ -14,7 +14,9 @@ from core.context import QueryContext
 from core.models import Answer, Query
 
 
-def parse_query_context(request_wire: bytes, client_addr: tuple[str, int]) -> QueryContext:
+def parse_query_context(
+    request_wire: bytes, client_addr: tuple[str, int]
+) -> QueryContext:
     """把原始请求报文转换为 QueryContext。"""
     request = dns.message.from_wire(request_wire)
     if not request.question:
@@ -24,6 +26,7 @@ def parse_query_context(request_wire: bytes, client_addr: tuple[str, int]) -> Qu
     ecs = _find_ecs_option(request.options)
     query = Query(
         client_addr=client_addr,
+        txid=request.id,
         qname=question.name,
         qtype=question.rdtype,
         ecs=ecs,
@@ -42,7 +45,7 @@ def build_response_wire(ctx: QueryContext, answer: Answer) -> bytes:
     return response.to_wire()
 
 
-def build_error_response_wire(request_wire: bytes, rcode: int) -> bytes:
+def build_error_response_wire(request_wire: bytes, rcode: dns.rcode.Rcode) -> bytes:
     """在解析失败等场景下构造错误响应。"""
     try:
         request = dns.message.from_wire(request_wire, ignore_trailing=True)

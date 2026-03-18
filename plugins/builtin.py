@@ -5,6 +5,9 @@ from __future__ import annotations
 from core.context import QueryContext
 from core.hooks import RequestHook, ResolverHook, ResponseHook
 from core.models import ResolverResult
+from logger import get_logger
+
+logger = get_logger("core.plugins.builtin")
 
 
 class NoopRequestHook(RequestHook):
@@ -12,6 +15,7 @@ class NoopRequestHook(RequestHook):
 
     async def on_request(self, ctx: QueryContext) -> None:
         _ = ctx
+        logger.debug("请求: %s", ctx.query)
 
 
 class NoopResolverHook(ResolverHook):
@@ -23,6 +27,7 @@ class NoopResolverHook(ResolverHook):
         result: ResolverResult,
     ) -> ResolverResult | None:
         _ = ctx
+        logger.debug("上游结果: %s", result)
         return result
 
 

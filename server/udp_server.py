@@ -9,7 +9,15 @@ import dns.exception
 import dns.rcode
 
 from core.pipeline import Pipeline
-from core.wire import build_error_response_wire, build_response_wire, parse_query_context
+from core.wire import (
+    build_error_response_wire,
+    build_response_wire,
+    parse_query_context,
+)
+from logger import get_logger
+
+
+logger = get_logger("server.udp")
 
 
 class _DNSDatagramProtocol(asyncio.DatagramProtocol):
@@ -46,7 +54,9 @@ class _DNSDatagramProtocol(asyncio.DatagramProtocol):
 class UDPDNSServer:
     """把 UDP 报文接入 Pipeline 的服务对象。"""
 
-    def __init__(self, pipeline: Pipeline, host: str = "127.0.0.1", port: int = 5353) -> None:
+    def __init__(
+        self, pipeline: Pipeline, host: str = "127.0.0.1", port: int = 5335
+    ) -> None:
         self.pipeline = pipeline
         self.host = host
         self.port = port
@@ -66,6 +76,7 @@ class UDPDNSServer:
         if sockname is not None:
             self.port = sockname[1]
         self._closed.clear()
+        logger.info("UDP DNS 服务已启动 host=%s port=%s", self.host, self.port)
 
     async def stop(self) -> None:
         if self._transport is None:
@@ -75,16 +86,33 @@ class UDPDNSServer:
         self._transport = None
         self._protocol = None
         self._closed.set()
+        logger.info("UDP DNS 服务已停止 host=%s port=%s", self.host, self.port)
 
     async def serve_forever(self) -> None:
         await self._closed.wait()
 
     async def _process_datagram(self, data: bytes, addr: tuple[str, int]) -> bytes:
         try:
+            logger.debug("收到请求 client=%s bytes=%s", addr, len(data))
             ctx = parse_query_context(data, client_addr=addr)
+            logger.debug(
+                "请求详情 qname=%s qtype=%s ecs=%s",
+                ctx.query.qname.to_text(),
+                ctx.query.qtype,
+                ctx.query.ecs,
+            )
             answer = await self.pipeline.process(ctx)
+            logger.debug(
+                "响应详情 qname=%s qtype=%s rcode=%s rrset_count=%s",
+                ctx.query.qname.to_text(),
+                ctx.query.qtype,
+                answer.rcode,
+                len(answer.rrsets),
+            )
             return build_response_wire(ctx, answer)
         except dns.exception.DNSException:
+            logger.exception("DNS 请求解析失败 client=%s", addr)
             return build_error_response_wire(data, rcode=dns.rcode.FORMERR)
         except Exception:
+            logger.exception("DNS 请求处理异常 client=%s", addr)
             return build_error_response_wire(data, rcode=dns.rcode.SERVFAIL)

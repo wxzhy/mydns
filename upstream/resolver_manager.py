@@ -6,8 +6,13 @@ import asyncio
 import time
 
 from core.context import QueryContext
-from core.hooks import Resolver, ResolverHook
+from core.hooks import ResolverHook
 from core.models import ResolverResult
+from logger import get_logger
+from resolver.resolver import Resolver
+
+
+logger = get_logger("upstream.resolver_manager")
 
 
 class ResolverManager:
@@ -24,6 +29,14 @@ class ResolverManager:
     async def collect(self, ctx: QueryContext, timeout_s: float) -> None:
         """并发收集上游结果，并写入 ctx.candidates。"""
         matched = [r for r in self.resolvers if self._resolver_match_tags(r, ctx.tags)]
+        logger.debug(
+            "开始上游并发查询 qname=%s qtype=%s tags=%s matched=%s timeout=%.3fs",
+            ctx.query.qname.to_text(),
+            ctx.query.qtype,
+            sorted(ctx.tags),
+            [x.name for x in matched],
+            timeout_s,
+        )
         if not matched:
             return
 
@@ -52,6 +65,18 @@ class ResolverManager:
                 processed = await self._run_resolver_hooks(ctx, result)
                 if processed is not None:
                     ctx.candidates.append(processed)
+                    logger.debug(
+                        "上游结果保留 resolver=%s elapsed_ms=%.2f rcode=%s error=%s",
+                        processed.resolver_name,
+                        processed.elapsed_ms or -1,
+                        processed.answer.rcode if processed.answer else None,
+                        repr(processed.error) if processed.error else None,
+                    )
+                else:
+                    logger.debug(
+                        "上游结果被hook丢弃 resolver=%s",
+                        result.resolver_name,
+                    )
 
         for task in pending:
             task.cancel()

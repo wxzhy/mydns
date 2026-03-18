@@ -9,9 +9,10 @@ import dns.rcode
 import dns.rdatatype
 
 from core.context import QueryContext
-from core.hooks import RequestHook, Resolver, ResponseHook
+from core.hooks import RequestHook, ResponseHook
 from core.models import Answer, Query
 from core.pipeline import Pipeline
+from resolver.resolver import Resolver
 
 
 class _TrackRequestHook(RequestHook):
@@ -52,7 +53,9 @@ class _FailIfCalledResolver(Resolver):
     name = "fail-if-called"
     tags = {"default"}
 
-    async def resolve(self, query: Query, timeout_s: float) -> Answer:  # pragma: no cover
+    async def resolve(
+        self, query: Query, timeout_s: float
+    ) -> Answer:  # pragma: no cover
         _ = query, timeout_s
         raise AssertionError("短路后不应再访问上游")
 
@@ -60,7 +63,7 @@ class _FailIfCalledResolver(Resolver):
 class TestPipelineStep2(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         query = Query(
-            client_addr=("127.0.0.1", 5353),
+            client_addr=("127.0.0.1", 5335),
             qname=dns.name.from_text("example.com."),
             qtype=dns.rdatatype.A,
         )

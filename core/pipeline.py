@@ -7,8 +7,8 @@ import dns.rcode
 from core.context import QueryContext
 from core.hooks import RequestHook, Resolver, ResolverHook, ResponseHook
 from core.models import Answer
-from core.resolver_manager import ResolverManager
-from core.selector import select_best_answer
+from upstream.resolver_manager import ResolverManager
+from upstream.selector import select_best_answer
 
 
 class Pipeline:
@@ -21,12 +21,11 @@ class Pipeline:
         resolver_hooks: list[ResolverHook] | None = None,
         request_hooks: list[RequestHook] | None = None,
         response_hooks: list[ResponseHook] | None = None,
-        resolver_manager: ResolverManager | None = None,
         upstream_timeout_s: float = 0.8,
     ) -> None:
         self.request_hooks = request_hooks or []
         self.response_hooks = response_hooks or []
-        self.resolver_manager = resolver_manager or ResolverManager(
+        self.resolver_manager = ResolverManager(
             resolvers=resolvers,
             resolver_hooks=resolver_hooks,
         )
@@ -34,14 +33,31 @@ class Pipeline:
 
     async def process(self, ctx: QueryContext) -> Answer:
         """执行完整流水线并返回最终响应。"""
+        logger.debug(
+            "处理请求 qname=%s qtype=%s client=%s tags=%s",
+            ctx.query.qname.to_text(),
+            ctx.query.qtype,
+            ctx.query.client_addr,
+            sorted(ctx.tags),
+        )
         await self._run_request_hooks(ctx)
         if not ctx.stop:
             await self._run_upstream(ctx)
+        else:
+            logger.debug("请求被request hook短路 qname=%s", ctx.query.qname.to_text())
 
         if ctx.final_answer is None:
             ctx.final_answer = self._fallback_answer(ctx)
 
         await self._run_response_hooks(ctx)
+        logger.debug(
+            "响应完成 qname=%s qtype=%s rcode=%s rrset_count=%s candidate_count=%s",
+            ctx.query.qname.to_text(),
+            ctx.query.qtype,
+            ctx.final_answer.rcode,
+            len(ctx.final_answer.rrsets),
+            len(ctx.candidates),
+        )
         return ctx.final_answer
 
     async def _run_request_hooks(self, ctx: QueryContext) -> None:

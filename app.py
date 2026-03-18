@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from core.pipeline import Pipeline
-from core.resolvers import UdpUpstreamResolver
+from resolver.udp_resolver import UdpUpstreamResolver
 from plugins.builtin import NoopRequestHook, NoopResolverHook, NoopResponseHook
 
 
