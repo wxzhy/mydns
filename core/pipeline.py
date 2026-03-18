@@ -8,6 +8,7 @@ from core.context import QueryContext
 from core.hooks import RequestHook, Resolver, ResolverHook, ResponseHook
 from core.models import Answer
 from core.resolver_manager import ResolverManager
+from core.selector import select_best_answer
 
 
 class Pipeline:
@@ -57,7 +58,4 @@ class Pipeline:
             await hook.on_response(ctx)
 
     def _fallback_answer(self, ctx: QueryContext) -> Answer:
-        for item in ctx.candidates:
-            if item.answer is not None:
-                return item.answer
-        return Answer(rcode=dns.rcode.SERVFAIL)
+        return select_best_answer(ctx)
