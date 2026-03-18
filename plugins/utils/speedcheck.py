@@ -6,14 +6,11 @@ import asyncio
 import time
 from collections.abc import Iterable
 
+from icmplib import async_ping
+
 from logger import get_logger
 
-logger = get_logger("upstream.speedcheck")
-
-try:  # pragma: no cover - 是否安装依赖由运行环境决定
-    from icmplib import async_ping
-except Exception:  # pragma: no cover
-    async_ping = None
+logger = get_logger("plugins.utils.speedcheck")
 
 
 async def probe_ips(
@@ -23,8 +20,7 @@ async def probe_ips(
     """并发测速多个 IP，返回每个 IP 的最佳 RTT（毫秒）。"""
     ip_list = list(dict.fromkeys(ips))
     tasks = {
-        ip: asyncio.create_task(probe_one_ip(ip, timeout_s=timeout_s))
-        for ip in ip_list
+        ip: asyncio.create_task(probe_one_ip(ip, timeout_s=timeout_s)) for ip in ip_list
     }
     results: dict[str, float | None] = {}
     for ip, task in tasks.items():
@@ -67,8 +63,6 @@ async def probe_one_ip(ip: str, timeout_s: float) -> float | None:
 
 
 async def _probe_ping(ip: str, timeout_s: float) -> float | None:
-    if async_ping is None:
-        return None
     try:
         host = await async_ping(
             ip,

@@ -61,6 +61,8 @@ class TestCoreStep1(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(ctx.stop)
         self.assertEqual(ctx.tags, {"default"})
         self.assertEqual(ctx.candidates, [])
+        self.assertEqual(ctx.ip_list.ips, set())
+        self.assertEqual(ctx.ip_list.results, {})
         self.assertIsNone(ctx.final_answer)
         self.assertEqual(ctx.state, {})
 

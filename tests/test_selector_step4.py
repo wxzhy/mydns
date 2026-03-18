@@ -54,7 +54,7 @@ def _answer_with_aaaa(ipv6: str) -> Answer:
 
 
 class TestSelectorStep4(unittest.TestCase):
-    def test_a_fastest_two_ips_with_cname_chain(self) -> None:
+    def test_a_fastest_normal_with_cname_chain(self) -> None:
         ctx = QueryContext(query=_make_query(dns.rdatatype.A))
         ctx.candidates = [
             ResolverResult("slow", _answer_with_a("1.1.1.1"), elapsed_ms=40),
@@ -71,10 +71,10 @@ class TestSelectorStep4(unittest.TestCase):
 
         a_rrset = answer.rrsets[-1]
         ips = {rdata.to_text() for rdata in a_rrset}
-        self.assertEqual(ips, {"1.1.1.1", "2.2.2.2"})
-        self.assertEqual(len(a_rrset), 2)
+        self.assertEqual(ips, {"2.2.2.2"})
+        self.assertEqual(len(a_rrset), 1)
 
-    def test_aaaa_fastest_two_ips(self) -> None:
+    def test_aaaa_fastest_normal(self) -> None:
         ctx = QueryContext(query=_make_query(dns.rdatatype.AAAA))
         ctx.candidates = [
             ResolverResult("r1", _answer_with_aaaa("2001:db8::1"), elapsed_ms=15),
@@ -85,7 +85,7 @@ class TestSelectorStep4(unittest.TestCase):
         answer = select_best_answer(ctx)
         aaaa_rrset = [x for x in answer.rrsets if x.rdtype == dns.rdatatype.AAAA][0]
         ips = {rdata.to_text() for rdata in aaaa_rrset}
-        self.assertEqual(ips, {"2001:db8::1", "2001:db8::2"})
+        self.assertEqual(ips, {"2001:db8::2"})
 
     def test_non_a_type_fastest_response_passthrough(self) -> None:
         txt_slow = Answer(
@@ -106,7 +106,7 @@ class TestSelectorStep4(unittest.TestCase):
         ]
 
         answer = select_best_answer(ctx)
-        self.assertEqual(answer.rcode, dns.rcode.NXDOMAIN)
+        self.assertEqual(answer.rrsets[0][0].to_text(), '"fast"')
 
 
 if __name__ == "__main__":

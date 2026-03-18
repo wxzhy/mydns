@@ -78,4 +78,18 @@ class Pipeline:
             await hook.on_response(ctx)
 
     def _fallback_answer(self, ctx: QueryContext) -> Answer:
+        logger.debug(
+            "开始选择基础结果 qname=%s qtype=%s candidates=%s",
+            ctx.query.qname.to_text(),
+            ctx.query.qtype,
+            [
+                {
+                    "resolver": item.resolver_name,
+                    "elapsed_ms": item.elapsed_ms,
+                    "rcode": item.answer.rcode if item.answer else None,
+                    "error": repr(item.error) if item.error else None,
+                }
+                for item in ctx.candidates
+            ],
+        )
         return select_best_answer(ctx)

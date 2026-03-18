@@ -38,3 +38,11 @@ class ResolverResult:
     answer: Answer | None
     elapsed_ms: float | None
     error: Exception | None = None
+
+
+@dataclass(slots=True)
+class IPList:
+    """IP 列表抽象。"""
+
+    ips: set[str] = field(default_factory=set)
+    results: dict[str, float | None] = field(default_factory=dict)

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from core.models import Answer, Query, ResolverResult
+from core.models import Answer, IPList, Query, ResolverResult
 
 
 @dataclass(slots=True)
@@ -15,6 +15,7 @@ class QueryContext:
     query: Query
     final_answer: Answer | None = None
     candidates: list[ResolverResult] = field(default_factory=list)
+    ip_list: IPList = field(default_factory=IPList)
     tags: set[str] = field(default_factory=lambda: {"default"})
     state: dict[str, Any] = field(default_factory=dict)
     stop: bool = False

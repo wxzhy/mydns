@@ -13,8 +13,13 @@ def build_pipeline() -> Pipeline:
     request_hooks = [NoopRequestHook()]
     # 测速插件要求放在其他 resolver hook 之后。
     resolver_hooks = [NoopResolverHook(), SpeedCheckResolverHook()]
-    response_hooks = [NoopResponseHook(), RewriteAnswerByRTTHook(max_return_ips=2)]
+    response_hooks = [
+        NoopResponseHook(),
+        RewriteAnswerByRTTHook(max_return_ips=2, ttl_s=900),
+    ]
     resolvers = [
+        UdpUpstreamResolver(name="alidns", address="223.5.5.5"),
+        UdpUpstreamResolver(name="dnspod", address="119.29.29.29"),
         UdpUpstreamResolver(name="cloudflare", address="1.1.1.1"),
         UdpUpstreamResolver(name="google", address="8.8.8.8"),
     ]

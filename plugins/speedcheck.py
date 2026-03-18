@@ -12,7 +12,7 @@ from core.context import QueryContext
 from core.hooks import ResolverHook, ResponseHook
 from core.models import ResolverResult
 from logger import get_logger
-from upstream.speedcheck import probe_ips
+from plugins.utils.speedcheck import probe_ips
 
 
 logger = get_logger("plugins.speedcheck")
@@ -37,28 +37,59 @@ class SpeedCheckResolverHook(ResolverHook):
         result: ResolverResult,
     ) -> ResolverResult | None:
         if result.answer is None or result.error is not None:
+            logger.debug(
+                "测速跳过 resolver=%s reason=answer_or_error answer=%s error=%s",
+                result.resolver_name,
+                result.answer is not None,
+                repr(result.error) if result.error else None,
+            )
             return result
         if ctx.query.qtype not in {dns.rdatatype.A, dns.rdatatype.AAAA}:
+            logger.debug(
+                "测速跳过 resolver=%s qtype=%s reason=unsupported_qtype",
+                result.resolver_name,
+                ctx.query.qtype,
+            )
             return result
 
         ips = _extract_ips(result.answer.rrsets, qtype=ctx.query.qtype)
         if not ips:
+            logger.debug(
+                "测速跳过 resolver=%s qname=%s qtype=%s reason=no_ip_rrset",
+                result.resolver_name,
+                ctx.query.qname.to_text(),
+                ctx.query.qtype,
+            )
             return result
 
-        tested = await self.probe_func(ips, self.timeout_s)
-        merged = ctx.state.setdefault("ip_rtt_ms", {})
-        for ip, rtt in tested.items():
-            if rtt is None:
-                continue
-            current = merged.get(ip)
-            merged[ip] = rtt if current is None else min(current, rtt)
+        # 单个请求内的测速结果统一记录在 ctx.ip_list 中。
+        ctx.ip_list.ips.update(ips)
+        pending = [ip for ip in ips if ip not in ctx.ip_list.results]
+        tested: dict[str, float | None] = {}
         logger.debug(
-            "测速完成 resolver=%s qname=%s qtype=%s ips=%s rtt=%s",
+            "测速准备 resolver=%s qname=%s qtype=%s ips=%s pending=%s cached=%s",
             result.resolver_name,
             ctx.query.qname.to_text(),
             ctx.query.qtype,
             ips,
+            pending,
+            ctx.ip_list.results,
+        )
+        if pending:
+            tested = await self.probe_func(pending, self.timeout_s)
+            for ip, rtt in tested.items():
+                ctx.ip_list.results[ip] = rtt
+
+        # 日志里保留本次真实发起测速的 IP，便于定位重复去重效果。
+        logger.debug(
+            "测速完成 resolver=%s qname=%s qtype=%s ips=%s pending=%s rtt=%s cache=%s",
+            result.resolver_name,
+            ctx.query.qname.to_text(),
+            ctx.query.qtype,
+            ips,
+            pending,
             tested,
+            ctx.ip_list.results,
         )
         return result
 
@@ -66,22 +97,43 @@ class SpeedCheckResolverHook(ResolverHook):
 class RewriteAnswerByRTTHook(ResponseHook):
     """按测速结果改写 A/AAAA 响应中的 IP 顺序与集合。"""
 
-    def __init__(self, max_return_ips: int = 2) -> None:
+    def __init__(
+        self,
+        max_return_ips: int = 2,
+        ttl_s: int = 900,
+    ) -> None:
         self.max_return_ips = max_return_ips
+        self.ttl_s = max(600, min(900, ttl_s))
 
     async def on_response(self, ctx: QueryContext) -> None:
         answer = ctx.final_answer
         if answer is None:
+            logger.debug("响应改写跳过 qname=%s reason=no_final_answer", ctx.query.qname.to_text())
             return
         if ctx.query.qtype not in {dns.rdatatype.A, dns.rdatatype.AAAA}:
+            logger.debug(
+                "响应改写跳过 qname=%s qtype=%s reason=unsupported_qtype",
+                ctx.query.qname.to_text(),
+                ctx.query.qtype,
+            )
             return
 
-        ip_rtt: dict[str, float] = ctx.state.get("ip_rtt_ms", {})
+        ip_rtt = {ip: rtt for ip, rtt in ctx.ip_list.results.items() if rtt is not None}
         if not ip_rtt:
+            logger.debug(
+                "响应改写跳过 qname=%s qtype=%s reason=no_rtt_data",
+                ctx.query.qname.to_text(),
+                ctx.query.qtype,
+            )
             return
 
         target_rrsets = [x for x in answer.rrsets if x.rdtype == ctx.query.qtype]
         if not target_rrsets:
+            logger.debug(
+                "响应改写跳过 qname=%s qtype=%s reason=no_target_rrset",
+                ctx.query.qname.to_text(),
+                ctx.query.qtype,
+            )
             return
 
         rrset = target_rrsets[0]
@@ -92,8 +144,10 @@ class RewriteAnswerByRTTHook(ResponseHook):
             return
 
         selected_ips = ranked_ips[:limit]
+        old_ips = [rdata.to_text() for rdata in rrset]
+        cname_count = sum(1 for x in answer.rrsets if x.rdtype == dns.rdatatype.CNAME)
         rewritten = dns.rrset.RRset(rrset.name, rrset.rdclass, rrset.rdtype)
-        rewritten.ttl = rrset.ttl
+        rewritten.ttl = self.ttl_s
         for ip in selected_ips:
             rdata = dns.rdata.from_text(rrset.rdclass, rrset.rdtype, ip)
             rewritten.add(rdata, rewritten.ttl)
@@ -109,10 +163,13 @@ class RewriteAnswerByRTTHook(ResponseHook):
             new_rrsets.append(item)
         answer.rrsets = new_rrsets
         logger.debug(
-            "响应IP改写 qname=%s qtype=%s selected=%s rtt=%s",
+            "响应IP改写 qname=%s qtype=%s cname_count=%s old_ips=%s new_ips=%s ttl=%s rtt=%s",
             ctx.query.qname.to_text(),
             ctx.query.qtype,
+            cname_count,
+            old_ips,
             selected_ips,
+            rewritten.ttl,
             ip_rtt,
         )
 
