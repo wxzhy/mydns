@@ -1,0 +1,28 @@
+# mydns 示例配置（当前版本仅作说明用途，尚未接入自动加载）
+
+server:
+  host: 127.0.0.1
+  port: 5353
+
+pipeline:
+  upstream_timeout_s: 0.8
+
+resolvers:
+  - name: cloudflare
+    type: udp
+    address: 1.1.1.1
+    port: 53
+    tags: [default]
+  - name: google
+    type: udp
+    address: 8.8.8.8
+    port: 53
+    tags: [default]
+
+hooks:
+  request:
+    - plugins.builtin.NoopRequestHook
+  resolver:
+    - plugins.builtin.NoopResolverHook
+  response:
+    - plugins.builtin.NoopResponseHook
