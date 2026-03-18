@@ -5,8 +5,9 @@ from __future__ import annotations
 import dns.rcode
 
 from core.context import QueryContext
-from core.hooks import RequestHook, Resolver, ResponseHook
-from core.models import Answer, ResolverResult
+from core.hooks import RequestHook, Resolver, ResolverHook, ResponseHook
+from core.models import Answer
+from core.resolver_manager import ResolverManager
 
 
 class Pipeline:
@@ -16,13 +17,18 @@ class Pipeline:
         self,
         *,
         resolvers: list[Resolver] | None = None,
+        resolver_hooks: list[ResolverHook] | None = None,
         request_hooks: list[RequestHook] | None = None,
         response_hooks: list[ResponseHook] | None = None,
+        resolver_manager: ResolverManager | None = None,
         upstream_timeout_s: float = 0.8,
     ) -> None:
-        self.resolvers = resolvers or []
         self.request_hooks = request_hooks or []
         self.response_hooks = response_hooks or []
+        self.resolver_manager = resolver_manager or ResolverManager(
+            resolvers=resolvers,
+            resolver_hooks=resolver_hooks,
+        )
         self.upstream_timeout_s = upstream_timeout_s
 
     async def process(self, ctx: QueryContext) -> Answer:
@@ -44,25 +50,7 @@ class Pipeline:
                 break
 
     async def _run_upstream(self, ctx: QueryContext) -> None:
-        for resolver in self.resolvers:
-            try:
-                answer = await resolver.resolve(ctx.query, self.upstream_timeout_s)
-                ctx.candidates.append(
-                    ResolverResult(
-                        resolver_name=resolver.name,
-                        answer=answer,
-                        elapsed_ms=None,
-                    )
-                )
-            except Exception as exc:  # pragma: no cover - Step2 先保留异常通道
-                ctx.candidates.append(
-                    ResolverResult(
-                        resolver_name=resolver.name,
-                        answer=None,
-                        elapsed_ms=None,
-                        error=exc,
-                    )
-                )
+        await self.resolver_manager.collect(ctx, self.upstream_timeout_s)
 
     async def _run_response_hooks(self, ctx: QueryContext) -> None:
         for hook in self.response_hooks:
