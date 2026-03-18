@@ -16,9 +16,9 @@ class Query:
     """DNS 请求抽象。"""
 
     client_addr: tuple[str, int] | None
-    txid: int
     qname: dns.name.Name
     qtype: dns.rdatatype.RdataType
+    txid: int = 0
     ecs: dns.edns.ECSOption | None = None
 
 

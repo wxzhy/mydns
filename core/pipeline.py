@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
-import dns.rcode
-
 from core.context import QueryContext
-from core.hooks import RequestHook, Resolver, ResolverHook, ResponseHook
+from core.hooks import RequestHook, ResolverHook, ResponseHook
 from core.models import Answer
+from logger import get_logger
+from resolver.resolver import Resolver
 from upstream.resolver_manager import ResolverManager
 from upstream.selector import select_best_answer
+
+
+logger = get_logger("core.pipeline")
 
 
 class Pipeline:
@@ -25,6 +28,7 @@ class Pipeline:
     ) -> None:
         self.request_hooks = request_hooks or []
         self.response_hooks = response_hooks or []
+        # 固定在初始化阶段创建 resolver manager。
         self.resolver_manager = ResolverManager(
             resolvers=resolvers,
             resolver_hooks=resolver_hooks,

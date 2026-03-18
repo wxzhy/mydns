@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 from core.pipeline import Pipeline
-from resolver.udp_resolver import UdpUpstreamResolver
 from plugins.builtin import NoopRequestHook, NoopResolverHook, NoopResponseHook
+from plugins.speedcheck import RewriteAnswerByRTTHook, SpeedCheckResolverHook
+from resolver.udp_resolver import UdpUpstreamResolver
 
 
 def build_pipeline() -> Pipeline:
     """构建默认运行所需对象。"""
     request_hooks = [NoopRequestHook()]
-    resolver_hooks = [NoopResolverHook()]
-    response_hooks = [NoopResponseHook()]
+    # 测速插件要求放在其他 resolver hook 之后。
+    resolver_hooks = [NoopResolverHook(), SpeedCheckResolverHook()]
+    response_hooks = [NoopResponseHook(), RewriteAnswerByRTTHook(max_return_ips=2)]
     resolvers = [
         UdpUpstreamResolver(name="cloudflare", address="1.1.1.1"),
         UdpUpstreamResolver(name="google", address="8.8.8.8"),

@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import time
 
+import dns.rdatatype
+
 from core.context import QueryContext
 from core.hooks import ResolverHook
 from core.models import ResolverResult
@@ -29,13 +31,15 @@ class ResolverManager:
     async def collect(self, ctx: QueryContext, timeout_s: float) -> None:
         """并发收集上游结果，并写入 ctx.candidates。"""
         matched = [r for r in self.resolvers if self._resolver_match_tags(r, ctx.tags)]
+        wait_all = _need_wait_all_results(ctx.query.qtype)
         logger.debug(
-            "开始上游并发查询 qname=%s qtype=%s tags=%s matched=%s timeout=%.3fs",
+            "开始上游并发查询 qname=%s qtype=%s tags=%s matched=%s timeout=%.3fs strategy=%s",
             ctx.query.qname.to_text(),
             ctx.query.qtype,
             sorted(ctx.tags),
             [x.name for x in matched],
             timeout_s,
+            "wait_all" if wait_all else "first_success",
         )
         if not matched:
             return
@@ -46,6 +50,7 @@ class ResolverManager:
             asyncio.create_task(self._query_one(resolver, ctx, timeout_s))
             for resolver in matched
         }
+        should_stop = False
 
         while pending:
             remaining = deadline - loop.time()
@@ -72,11 +77,20 @@ class ResolverManager:
                         processed.answer.rcode if processed.answer else None,
                         repr(processed.error) if processed.error else None,
                     )
+                    if not wait_all and _is_non_exception_result(processed):
+                        should_stop = True
+                        logger.debug(
+                            "非A/AAAA已获得首个可用结果 resolver=%s，提前结束等待",
+                            processed.resolver_name,
+                        )
+                        break
                 else:
                     logger.debug(
                         "上游结果被hook丢弃 resolver=%s",
                         result.resolver_name,
                     )
+            if should_stop:
+                break
 
         for task in pending:
             task.cancel()
@@ -124,3 +138,11 @@ class ResolverManager:
                 return None
             current = await hook.on_resolver_result(ctx, current)
         return current
+
+
+def _need_wait_all_results(qtype: dns.rdatatype.RdataType) -> bool:
+    return qtype in {dns.rdatatype.A, dns.rdatatype.AAAA}
+
+
+def _is_non_exception_result(result: ResolverResult) -> bool:
+    return result.error is None and result.answer is not None

@@ -28,10 +28,6 @@ def select_best_answer(ctx: QueryContext) -> Answer:
 
 def _select_fastest_success(candidates: list[ResolverResult]) -> Answer:
     ordered = sorted(candidates, key=_candidate_speed_key)
-    for item in ordered:
-        answer = item.answer
-        if answer is not None and answer.rcode == dns.rcode.NOERROR:
-            return answer
     return ordered[0].answer
 
 

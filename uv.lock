@@ -12,17 +12,28 @@ wheels = [
 ]
 
 [[package]]
+name = "icmplib"
+version = "3.0.4"
+source = { registry = "https://mirrors.cernet.edu.cn/pypi/web/simple" }
+sdist = { url = "https://mirror.nju.edu.cn/pypi/web/packages/6d/78/ca07444be85ec718d4a7617f43fdb5b4eaae40bc15a04a5c888b64f3e35f/icmplib-3.0.4.tar.gz", hash = "sha256:57868f2cdb011418c0e1d5586b16d1fabd206569fe9652654c27b6b2d6a316de" }
+wheels = [
+    { url = "https://mirror.nju.edu.cn/pypi/web/packages/38/ab/a47a2fdcf930e986914c642242ce2823753d7b08fda485f52323132f1240/icmplib-3.0.4-py3-none-any.whl", hash = "sha256:336b75c6c23c5ce99ddec33f718fab09661f6ad698e35b6f1fc7cc0ecf809398" },
+]
+
+[[package]]
 name = "mydns"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "dnspython" },
+    { name = "icmplib" },
     { name = "winuvloop" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "dnspython", specifier = ">=2.8.0" },
+    { name = "icmplib", specifier = ">=3.0.4" },
     { name = "winuvloop", specifier = ">=0.2.0" },
 ]
 

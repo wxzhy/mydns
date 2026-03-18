@@ -87,7 +87,7 @@ class TestSelectorStep4(unittest.TestCase):
         ips = {rdata.to_text() for rdata in aaaa_rrset}
         self.assertEqual(ips, {"2001:db8::1", "2001:db8::2"})
 
-    def test_non_a_type_fastest_success_passthrough(self) -> None:
+    def test_non_a_type_fastest_response_passthrough(self) -> None:
         txt_slow = Answer(
             rcode=dns.rcode.NOERROR,
             rrsets=[dns.rrset.from_text("example.com.", 60, "IN", "TXT", '"slow"')],
@@ -106,7 +106,7 @@ class TestSelectorStep4(unittest.TestCase):
         ]
 
         answer = select_best_answer(ctx)
-        self.assertEqual(answer.rrsets[0][0].to_text(), '"fast"')
+        self.assertEqual(answer.rcode, dns.rcode.NXDOMAIN)
 
 
 if __name__ == "__main__":

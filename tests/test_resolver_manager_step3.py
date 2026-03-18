@@ -11,8 +11,9 @@ import dns.rcode
 import dns.rdatatype
 
 from core.context import QueryContext
-from core.hooks import Resolver, ResolverHook
+from core.hooks import ResolverHook
 from core.models import Answer, Query, ResolverResult
+from resolver.resolver import Resolver
 from upstream.resolver_manager import ResolverManager
 
 
@@ -65,12 +66,17 @@ class _RewriteRcodeHook(ResolverHook):
 
 class TestResolverManagerStep3(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
-        query = Query(
-            client_addr=("127.0.0.1", 5335),
-            qname=dns.name.from_text("example.com."),
-            qtype=dns.rdatatype.A,
+        self.ctx = self._new_ctx(dns.rdatatype.A)
+
+    @staticmethod
+    def _new_ctx(qtype: dns.rdatatype.RdataType) -> QueryContext:
+        return QueryContext(
+            query=Query(
+                client_addr=("127.0.0.1", 5335),
+                qname=dns.name.from_text("example.com."),
+                qtype=qtype,
+            )
         )
-        self.ctx = QueryContext(query=query)
 
     async def test_concurrent_collect(self) -> None:
         manager = ResolverManager(
@@ -124,6 +130,39 @@ class TestResolverManagerStep3(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.ctx.candidates), 1)
         self.assertEqual(self.ctx.candidates[0].resolver_name, "good")
         self.assertEqual(self.ctx.candidates[0].answer.rcode, dns.rcode.NOERROR)
+
+    async def test_non_a_returns_first_non_exception(self) -> None:
+        ctx = self._new_ctx(dns.rdatatype.TXT)
+        manager = ResolverManager(
+            resolvers=[
+                _SleepResolver("fast-error", delay_s=0.01, error=RuntimeError("err")),
+                _SleepResolver("fast-good", delay_s=0.03, answer=Answer(rcode=dns.rcode.NOERROR)),
+                _SleepResolver("slow-good", delay_s=0.2, answer=Answer(rcode=dns.rcode.NOERROR)),
+            ]
+        )
+        start = time.perf_counter()
+        await manager.collect(ctx, timeout_s=0.5)
+        duration = time.perf_counter() - start
+
+        names = [x.resolver_name for x in ctx.candidates]
+        self.assertLess(duration, 0.15)
+        self.assertIn("fast-good", names)
+        self.assertNotIn("slow-good", names)
+
+    async def test_a_waits_all_resolver_and_hook(self) -> None:
+        ctx = self._new_ctx(dns.rdatatype.A)
+        manager = ResolverManager(
+            resolvers=[
+                _SleepResolver("fast", delay_s=0.02, answer=Answer(rcode=dns.rcode.NOERROR)),
+                _SleepResolver("slow", delay_s=0.16, answer=Answer(rcode=dns.rcode.NOERROR)),
+            ]
+        )
+        start = time.perf_counter()
+        await manager.collect(ctx, timeout_s=0.4)
+        duration = time.perf_counter() - start
+
+        self.assertGreaterEqual(duration, 0.14)
+        self.assertEqual({x.resolver_name for x in ctx.candidates}, {"fast", "slow"})
 
 
 if __name__ == "__main__":
