@@ -5,18 +5,19 @@ from dataclasses import dataclass
 from time import monotonic
 from typing import Sequence
 
-import dns.message
 import dns.rcode
+import dns.rrset
 
 from core.context import QueryContext
-from resolvers.resolver import ResolverProtocol
+from resolvers.resolver import DnsAnswer, ResolverProtocol
 
 
 @dataclass(slots=True)
 class ResolverRaceResult:
     """并发竞速结果。"""
 
-    response: dns.message.Message
+    rcode: dns.rcode.Rcode
+    answer: list[dns.rrset.RRset]
     winner: ResolverProtocol
     elapsed_ms: float
     errors: tuple[str, ...]
@@ -27,7 +28,8 @@ class ResolverBatchSuccess:
     """单个上游成功结果。"""
 
     resolver: ResolverProtocol
-    response: dns.message.Message
+    rcode: dns.rcode.Rcode
+    answer: list[dns.rrset.RRset]
     elapsed_ms: float
 
 
@@ -42,15 +44,14 @@ class ResolverBatchResult:
 async def resolve_fastest(
     resolvers: Sequence[ResolverProtocol],
     context: QueryContext,
-    query: dns.message.Message,
 ) -> ResolverRaceResult:
     """并发请求所有 resolver，返回首个 NOERROR 成功结果。"""
     if not resolvers:
         raise ValueError("Resolver 列表不能为空。")
 
     started_at = monotonic()
-    tasks: dict[asyncio.Task[dns.message.Message], ResolverProtocol] = {
-        asyncio.create_task(resolver.resolve(context, query)): resolver
+    tasks: dict[asyncio.Task[DnsAnswer], ResolverProtocol] = {
+        asyncio.create_task(resolver.resolve(context)): resolver
         for resolver in resolvers
     }
     errors: list[str] = []
@@ -64,14 +65,12 @@ async def resolve_fastest(
             for task in done:
                 resolver = tasks.pop(task)
                 try:
-                    response = task.result()
+                    rcode, answer = task.result()
                 except Exception as exc:  # pragma: no cover
                     errors.append(f"{resolver.name}: {exc}")
                     continue
-                if response.rcode() != dns.rcode.NOERROR:
-                    errors.append(
-                        f"{resolver.name}: rcode={dns.rcode.to_text(response.rcode())}"
-                    )
+                if rcode != dns.rcode.NOERROR:
+                    errors.append(f"{resolver.name}: rcode={dns.rcode.to_text(rcode)}")
                     continue
 
                 for pending_task in tasks:
@@ -80,7 +79,8 @@ async def resolve_fastest(
                     await asyncio.gather(*tasks.keys(), return_exceptions=True)
 
                 return ResolverRaceResult(
-                    response=response,
+                    rcode=rcode,
+                    answer=answer,
                     winner=resolver,
                     elapsed_ms=(monotonic() - started_at) * 1000,
                     errors=tuple(errors),
@@ -99,7 +99,6 @@ async def resolve_fastest(
 async def resolve_all(
     resolvers: Sequence[ResolverProtocol],
     context: QueryContext,
-    query: dns.message.Message,
 ) -> ResolverBatchResult:
     """并发请求全部 resolver，收集所有成功响应。"""
     if not resolvers:
@@ -107,13 +106,13 @@ async def resolve_all(
 
     async def _call_one(
         resolver: ResolverProtocol,
-    ) -> tuple[ResolverProtocol, dns.message.Message | None, float, Exception | None]:
+    ) -> tuple[ResolverProtocol, DnsAnswer | None, float, Exception | None]:
         started_at = monotonic()
         try:
-            response = await resolver.resolve(context, query)
+            result = await resolver.resolve(context)
         except Exception as exc:  # pragma: no cover
             return resolver, None, (monotonic() - started_at) * 1000, exc
-        return resolver, response, (monotonic() - started_at) * 1000, None
+        return resolver, result, (monotonic() - started_at) * 1000, None
 
     tasks = [asyncio.create_task(_call_one(resolver)) for resolver in resolvers]
     successes: list[ResolverBatchSuccess] = []
@@ -121,17 +120,19 @@ async def resolve_all(
 
     try:
         for task in asyncio.as_completed(tasks):
-            resolver, response, elapsed_ms, error = await task
+            resolver, result, elapsed_ms, error = await task
             if error is not None:
                 errors.append(f"{resolver.name}: {error}")
                 continue
-            if response is None:  # pragma: no cover
+            if result is None:  # pragma: no cover
                 errors.append(f"{resolver.name}: empty response")
                 continue
+            rcode, answer = result
             successes.append(
                 ResolverBatchSuccess(
                     resolver=resolver,
-                    response=response,
+                    rcode=rcode,
+                    answer=answer,
                     elapsed_ms=elapsed_ms,
                 )
             )

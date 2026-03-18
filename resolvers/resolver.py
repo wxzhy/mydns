@@ -3,10 +3,12 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from ipaddress import ip_network
 from time import monotonic
-from typing import Protocol
+from typing import Protocol, TypeAlias
 
 import dns.edns
 import dns.message
+import dns.rcode
+import dns.rrset
 
 from config import UpstreamConfig
 from core.context import QueryContext
@@ -14,6 +16,8 @@ from core.hooks import RequestHooks
 from logger import get_logger
 
 logger = get_logger(__name__)
+
+DnsAnswer: TypeAlias = tuple[dns.rcode.Rcode, list[dns.rrset.RRset]]
 
 
 class ResolverProtocol(Protocol):
@@ -28,12 +32,8 @@ class ResolverProtocol(Protocol):
     def stats_snapshot(self) -> dict[str, float | int | None]:
         """返回运行时统计快照。"""
 
-    async def resolve(
-        self,
-        context: QueryContext,
-        query: dns.message.Message,
-    ) -> dns.message.Message:
-        """执行一次 DNS 解析并返回响应。"""
+    async def resolve(self, context: QueryContext) -> DnsAnswer:
+        """执行一次 DNS 解析并返回 (rcode, answer_rrsets)。"""
 
 
 class BaseUpstreamResolver(ABC):
@@ -47,6 +47,7 @@ class BaseUpstreamResolver(ABC):
         hooks: RequestHooks | None = None,
     ) -> None:
         self._name = f"{self.protocol}://{upstream.host}:{upstream.port}"
+        self._tag: str = upstream.tag or "default"
         self._success_count = 0
         self._failure_count = 0
         self._last_rtt_ms: float | None = None
@@ -61,21 +62,22 @@ class BaseUpstreamResolver(ABC):
 
     @property
     def tag(self) -> str:
-        return self._upstream.tag
+        return self._tag
 
-    async def resolve(
-        self,
-        context: QueryContext,
-        query: dns.message.Message,
-    ) -> dns.message.Message:
+    async def resolve(self, context: QueryContext) -> DnsAnswer:
+        query = context.raw_query
+        if query is None:
+            raise ValueError("QueryContext.raw_query 不能为空。")
         started_at = monotonic()
         try:
             upstream_query = self._build_upstream_query(query)
             response = await self._perform_query(upstream_query)
-            response = await self._hooks.run_after_upstream(
+            rcode = response.rcode()
+            answer = list(response.answer)
+            await self._hooks.run_after_upstream(
                 context=context,
-                query=query,
-                response=response,
+                rcode=rcode,
+                answer=answer,
                 resolver_name=self.name,
             )
         except Exception as exc:  # pragma: no cover
@@ -96,7 +98,7 @@ class BaseUpstreamResolver(ABC):
 
         elapsed_ms = (monotonic() - started_at) * 1000
         self.mark_success(elapsed_ms)
-        return response
+        return rcode, answer
 
     @abstractmethod
     async def _perform_query(self, query: dns.message.Message) -> dns.message.Message:

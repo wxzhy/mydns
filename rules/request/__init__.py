@@ -33,37 +33,24 @@ def _normalize_tag_key(tag: str) -> str:
     return tag.strip().casefold()
 
 
-def _make_empty_noerror_response(query: dns.message.Message) -> dns.message.Message:
-    response = dns.message.make_response(query)
-    response.set_rcode(dns.rcode.NOERROR)
-    return response
-
-
 class DomainSetRouteHook(RequestHook):
     """按域名集合匹配请求路由标签（最长后缀优先）。"""
 
     def __init__(self, domainset: DomainSet) -> None:
         self._domainset = domainset
 
-    async def before_upstream(
-        self,
-        context: QueryContext,
-        query: dns.message.Message,
-    ) -> dns.message.Message | None:
-        qname = context.query_name or (
-            query.question[0].name.to_text() if query.question else ""
-        )
+    async def before_upstream(self, context: QueryContext) -> None:
+        qname = context.query_name or ""
         if not qname:
-            return None
+            return
 
         matched_tag = self._domainset.match_best(qname)
         if matched_tag is None:
-            return None
+            return
 
         context.tag = matched_tag
         context.tags["route_tag"] = matched_tag
         context.tags["route_tag_source"] = "domainset"
-        return None
 
 
 class ClientIPSetRouteHook(RequestHook):
@@ -72,24 +59,18 @@ class ClientIPSetRouteHook(RequestHook):
     def __init__(self, ipset: IPSet) -> None:
         self._ipset = ipset
 
-    async def before_upstream(
-        self,
-        context: QueryContext,
-        query: dns.message.Message,
-    ) -> dns.message.Message | None:
-        del query
+    async def before_upstream(self, context: QueryContext) -> None:
         # 已被 domainset 等规则设置过标签时，不再由 ipset 覆盖。
         if _normalize_tag_key(context.tag) != "default":
-            return None
+            return
 
         matched_tag = self._ipset.match_best(context.client_host)
         if matched_tag is None:
-            return None
+            return
 
         context.tag = matched_tag
         context.tags["route_tag"] = matched_tag
         context.tags["route_tag_source"] = "ipset"
-        return None
 
 
 class TagEmptyResponseHook(RequestHook):
@@ -102,16 +83,12 @@ class TagEmptyResponseHook(RequestHook):
             if (normalized := _normalize_tag_key(str(item)))
         }
 
-    async def before_upstream(
-        self,
-        context: QueryContext,
-        query: dns.message.Message,
-    ) -> dns.message.Message | None:
+    async def before_upstream(self, context: QueryContext) -> None:
         if _normalize_tag_key(context.tag) not in self._blocked_tags:
-            return None
+            return
         context.tags["request_rule"] = "ad-block-tag-empty"
         context.tags["ad_block_tag"] = context.tag
-        return _make_empty_noerror_response(query)
+        context.set_answer(dns.rcode.NOERROR, [])
 
 
 class DomainBlockHook(RequestHook):
@@ -135,34 +112,22 @@ class DomainBlockHook(RequestHook):
         self._suffixes = tuple(suffixes)
         self._rcode = rcode
 
-    async def before_upstream(
-        self,
-        context: QueryContext,
-        query: dns.message.Message,
-    ) -> dns.message.Message | None:
-        qname = context.query_name or (
-            query.question[0].name.to_text() if query.question else ""
-        )
-        qname = _normalize_domain(qname)
+    async def before_upstream(self, context: QueryContext) -> None:
+        qname = _normalize_domain(context.query_name or "")
         if not qname:
-            return None
+            return
 
-        if qname in self._exact or any(qname.endswith(suffix) for suffix in self._suffixes):
+        if qname in self._exact or any(
+            qname.endswith(suffix) for suffix in self._suffixes
+        ):
             context.tags["request_rule"] = "blocked-domain"
-            response = dns.message.make_response(query)
-            response.set_rcode(self._rcode)
-            return response
-        return None
+            context.set_answer(self._rcode, [])
 
 
 class RequestDebugHook(RequestHook):
     """请求阶段调试日志。"""
 
-    async def before_upstream(
-        self,
-        context: QueryContext,
-        query: dns.message.Message,
-    ) -> dns.message.Message | None:
+    async def before_upstream(self, context: QueryContext) -> None:
         logger.debug(
             "收到请求 client=%s:%s txid=%s qtype=%s domain=%s ecs=%s",
             context.client_host,
@@ -172,7 +137,6 @@ class RequestDebugHook(RequestHook):
             context.query_name or "-",
             context.ecs or "-",
         )
-        return None
 
 
 class RequestSanityDropHook(RequestHook):
@@ -184,22 +148,31 @@ class RequestSanityDropHook(RequestHook):
     不满足时直接标记丢弃（不回包）。
     """
 
-    async def before_upstream(
-        self,
-        context: QueryContext,
-        query: dns.message.Message,
-    ) -> dns.message.Message | None:
-        if query.opcode() != dns.opcode.QUERY:
+    async def before_upstream(self, context: QueryContext) -> None:
+        raw = context.raw_query
+        if raw is None:
+            return
+        if raw.opcode() != dns.opcode.QUERY:
             context.tags["drop_request"] = True
             context.tags["drop_reason"] = "unsupported-opcode"
-            return None
+            return
 
-        for question in query.question:
+        for question in raw.question:
             if question.rdclass != dns.rdataclass.IN:
                 context.tags["drop_request"] = True
                 context.tags["drop_reason"] = "unsupported-qclass"
-                return None
-        return None
+                return
+
+
+class IpBenchmarkTopNHook(RequestHook):
+    """为后续上游聚合阶段注入 A/AAAA 选取 IP 数量。"""
+
+    def __init__(self, top_n: int = 3) -> None:
+        self._top_n = max(1, int(top_n))
+
+    async def before_upstream(self, context: QueryContext) -> None:
+        # 允许前置自定义 Hook 通过 context.tags 显式覆盖。
+        context.tags.setdefault("ip_benchmark_top_n", self._top_n)
 
 
 class HostsHook(RequestHook):
@@ -218,60 +191,49 @@ class HostsHook(RequestHook):
             else:
                 self._records_v6.setdefault(normalized, []).append(str(parsed))
 
-    async def before_upstream(
-        self,
-        context: QueryContext,
-        query: dns.message.Message,
-    ) -> dns.message.Message | None:
-        if not query.question:
-            return None
+    async def before_upstream(self, context: QueryContext) -> None:
+        raw = context.raw_query
+        if not raw or not raw.question:
+            return
 
-        question = query.question[0]
+        question = raw.question[0]
         qname = _normalize_domain(question.name.to_text())
         if qname not in self._records_v4 and qname not in self._records_v6:
-            return None
+            return
 
-        response = dns.message.make_response(query)
-        response.set_rcode(dns.rcode.NOERROR)
-
+        answer: list[dns.rrset.RRset] = []
         if question.rdtype in (dns.rdatatype.A, dns.rdatatype.ANY):
-            self._append_rrset(
-                response=response,
+            rrset = _make_rrset(
                 owner=question.name.to_text(),
                 ttl=self._ttl,
                 rdtype=dns.rdatatype.A,
                 values=self._records_v4.get(qname, []),
             )
+            if rrset is not None:
+                answer.append(rrset)
         if question.rdtype in (dns.rdatatype.AAAA, dns.rdatatype.ANY):
-            self._append_rrset(
-                response=response,
+            rrset = _make_rrset(
                 owner=question.name.to_text(),
                 ttl=self._ttl,
                 rdtype=dns.rdatatype.AAAA,
                 values=self._records_v6.get(qname, []),
             )
+            if rrset is not None:
+                answer.append(rrset)
 
         context.tags["request_rule"] = "hosts"
-        return response
+        context.set_answer(dns.rcode.NOERROR, answer)
 
-    @staticmethod
-    def _append_rrset(
-        response: dns.message.Message,
-        owner: str,
-        ttl: int,
-        rdtype: dns.rdatatype.RdataType,
-        values: list[str],
-    ) -> None:
-        if not values:
-            return
-        rrset = dns.rrset.from_text(
-            owner,
-            ttl,
-            dns.rdataclass.IN,
-            rdtype,
-            *values,
-        )
-        response.answer.append(rrset)
+
+def _make_rrset(
+    owner: str,
+    ttl: int,
+    rdtype: dns.rdatatype.RdataType,
+    values: list[str],
+) -> dns.rrset.RRset | None:
+    if not values:
+        return None
+    return dns.rrset.from_text(owner, ttl, dns.rdataclass.IN, rdtype, *values)
 
 
 def build_request_hooks(
@@ -280,6 +242,7 @@ def build_request_hooks(
     domainset: DomainSet | None = None,
     ipset: IPSet | None = None,
     ad_block_tags: Iterable[str] | None = None,
+    ip_benchmark_top_n: int = 3,
     enable_debug: bool = True,
 ) -> tuple[RequestHook, ...]:
     hooks: list[RequestHook] = []
@@ -290,6 +253,7 @@ def build_request_hooks(
     if enable_debug:
         hooks.append(RequestDebugHook())
     hooks.append(RequestSanityDropHook())
+    hooks.append(IpBenchmarkTopNHook(top_n=ip_benchmark_top_n))
     if domainset is not None:
         hooks.append(DomainSetRouteHook(domainset=domainset))
     if ipset is not None:
@@ -316,6 +280,7 @@ __all__ = [
     "DomainBlockHook",
     "DomainSetRouteHook",
     "HostsHook",
+    "IpBenchmarkTopNHook",
     "RequestSanityDropHook",
     "RequestDebugHook",
     "TagEmptyResponseHook",

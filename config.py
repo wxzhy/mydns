@@ -63,6 +63,7 @@ class RuleConfig:
     domainset_dirs: tuple[str, ...] = ()
     ipset_dirs: tuple[str, ...] = ()
     ad_block_tags: tuple[str, ...] = ()
+    ip_benchmark_top_n: int = 3
 
 
 def _default_upstreams() -> tuple[UpstreamConfig, ...]:
@@ -193,6 +194,10 @@ def _parse_rules(
         root.get("ad_block_tag"),
         root.get("ad_block"),
     )
+    ip_benchmark_top_n_value = _first_non_none(
+        rules.get("ip_benchmark_top_n"),
+        root.get("ip_benchmark_top_n"),
+    )
 
     return RuleConfig(
         domainset_dirs=_parse_rule_directories(
@@ -208,6 +213,11 @@ def _parse_rules(
         ad_block_tags=_parse_rule_tags(
             ad_block_value,
             field_name="rules.ad_block_tags",
+        ),
+        ip_benchmark_top_n=_parse_positive_int(
+            ip_benchmark_top_n_value,
+            field_name="rules.ip_benchmark_top_n",
+            default=3,
         ),
     )
 
@@ -687,6 +697,23 @@ def _parse_text_items(
     return tuple(items)
 
 
+def _parse_positive_int(
+    value: Any,
+    *,
+    field_name: str,
+    default: int,
+) -> int:
+    if value is None:
+        return default
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"`{field_name}` must be a positive integer.") from exc
+    if parsed <= 0:
+        raise ValueError(f"`{field_name}` must be greater than 0.")
+    return parsed
+
+
 def _resolve_paths(
     items: tuple[str, ...],
     *,
@@ -728,6 +755,8 @@ def _validate_config(config: AppConfig) -> None:
         raise ValueError("`server.max_packet_size` must be in 12..65535.")
     if config.cache.max_size <= 0:
         raise ValueError("`cache.max_size` must be greater than 0.")
+    if config.rules.ip_benchmark_top_n <= 0:
+        raise ValueError("`rules.ip_benchmark_top_n` must be greater than 0.")
     _validate_directory_config(
         directories=config.rules.domainset_dirs,
         field_name="rules.domainset_dirs",

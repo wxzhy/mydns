@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-import dns.message
+import dns.rcode
+import dns.rrset
 
 from core.context import QueryContext
 from core.hooks import UpstreamHook
@@ -17,19 +18,18 @@ class UpstreamDebugHook(UpstreamHook):
     async def after_upstream(
         self,
         context: QueryContext,
-        query: dns.message.Message,
-        response: dns.message.Message,
+        rcode: dns.rcode.Rcode,
+        answer: list[dns.rrset.RRset],
         resolver_name: str,
-    ) -> dns.message.Message | None:
+    ) -> None:
         logger.debug(
             "上游返回 resolver=%s txid=%s qtype=%s domain=%s result=%s",
             resolver_name,
             context.txid if context.txid is not None else "-",
             context.query_type or "-",
             context.query_name or "-",
-            summarize_dns_result(response),
+            summarize_dns_result(rcode, answer),
         )
-        return None
 
 
 def build_upstream_hooks(enable_debug: bool = True) -> tuple[UpstreamHook, ...]:

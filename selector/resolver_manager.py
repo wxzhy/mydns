@@ -3,9 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping, Sequence
 from time import monotonic
 
-import dns.message
 import dns.rcode
-import dns.rdatatype
 
 from config import UpstreamConfig
 from core.context import QueryContext
@@ -15,7 +13,7 @@ from resolvers.doh_resolver import DohUpstreamResolver
 from resolvers.doq_resolver import DoqUpstreamResolver
 from resolvers.dnscrypt_resolver import DnscryptUpstreamResolver
 from resolvers.dot_resolver import DotUpstreamResolver
-from resolvers.resolver import BaseUpstreamResolver, ResolverProtocol
+from resolvers.resolver import BaseUpstreamResolver, DnsAnswer, ResolverProtocol
 from resolvers.tcp_resolver import TcpUpstreamResolver
 from resolvers.udp_resolver import UdpUpstreamResolver
 from selector.benchmark_selector import resolve_with_ip_benchmark
@@ -40,7 +38,9 @@ ResolverGroupTable = dict[str, ResolverTable]
 class ResolverManager:
     """统一管理多个 resolver，并按 tag 分组调度。"""
 
-    def __init__(self, resolver_groups: Mapping[str, Mapping[str, ResolverProtocol]]) -> None:
+    def __init__(
+        self, resolver_groups: Mapping[str, Mapping[str, ResolverProtocol]]
+    ) -> None:
         self._name = "resolver-manager"
         self._resolver_groups: ResolverGroupTable = {
             tag: dict(table) for tag, table in resolver_groups.items()
@@ -122,14 +122,12 @@ class ResolverManager:
                 stats[name] = resolver.stats_snapshot()
         return stats
 
-    async def resolve(
-        self,
-        context: QueryContext,
-        query: dns.message.Message,
-    ) -> dns.message.Message:
+    async def resolve(self, context: QueryContext) -> DnsAnswer:
         started_at = monotonic()
-        requested_tag, selected_tag, resolvers = self._pick_resolvers_by_context(context)
-        enable_ip_benchmark = _should_enable_ip_benchmark(query)
+        requested_tag, selected_tag, resolvers = self._pick_resolvers_by_context(
+            context
+        )
+        enable_ip_benchmark = _should_enable_ip_benchmark(context)
         context.tags["enable_ip_benchmark"] = enable_ip_benchmark
         context.tags["resolver_group"] = selected_tag
         if requested_tag != selected_tag:
@@ -139,7 +137,6 @@ class ResolverManager:
         if enable_ip_benchmark:
             return await self._resolve_with_benchmark(
                 context=context,
-                query=query,
                 started_at=started_at,
                 resolvers=resolvers,
             )
@@ -147,14 +144,12 @@ class ResolverManager:
         if len(resolvers) == 1:
             return await self._resolve_single(
                 context=context,
-                query=query,
                 started_at=started_at,
                 resolver=resolvers[0],
             )
 
         return await self._resolve_fastest(
             context=context,
-            query=query,
             started_at=started_at,
             resolvers=resolvers,
         )
@@ -183,19 +178,18 @@ class ResolverManager:
     async def _resolve_with_benchmark(
         self,
         context: QueryContext,
-        query: dns.message.Message,
         started_at: float,
         resolvers: Sequence[ResolverProtocol],
-    ) -> dns.message.Message:
+    ) -> DnsAnswer:
         try:
             benchmark_result = await resolve_with_ip_benchmark(
                 resolvers=resolvers,
                 context=context,
-                query=query,
             )
         except Exception as exc:  # pragma: no cover
             context.resolve_rtt_ms = (monotonic() - started_at) * 1000
             context.resolver_errors = [str(exc)]
+            context.selected_ips = []
             context.selected_ip = None
             context.selected_ip_rtt_ms = None
             logger.error(
@@ -205,16 +199,19 @@ class ResolverManager:
                 context.query_type or "-",
                 exc,
             )
-            return self._make_servfail(query)
+            return _make_servfail()
 
         context.selected_resolver = benchmark_result.winner.name
         context.resolve_rtt_ms = benchmark_result.elapsed_ms
         context.resolver_errors = list(benchmark_result.errors)
+        context.selected_ips = list(benchmark_result.selected_ips)
         context.selected_ip = benchmark_result.selected_ip
         context.selected_ip_rtt_ms = benchmark_result.selected_ip_rtt_ms
         context.tags["resolver_winner"] = benchmark_result.winner.name
         if benchmark_result.errors:
             context.tags["resolver_failures"] = list(benchmark_result.errors)
+        if benchmark_result.selected_ips:
+            context.tags["selected_ips"] = list(benchmark_result.selected_ips)
         if benchmark_result.selected_ip is not None:
             context.tags["selected_ip_source_resolver"] = (
                 benchmark_result.selected_ip_source_resolver
@@ -222,7 +219,7 @@ class ResolverManager:
             )
 
         logger.info(
-            "并发解析+测速完成 winner=%s ip_source=%s rtt=%.2fms txid=%s qname=%s qtype=%s selected_ip=%s selected_ip_rtt=%s",
+            "并发解析+测速完成 winner=%s ip_source=%s rtt=%.2fms txid=%s qname=%s qtype=%s selected_ips=%s primary_ip_rtt=%s",
             benchmark_result.winner.name,
             benchmark_result.selected_ip_source_resolver
             or benchmark_result.winner.name,
@@ -230,24 +227,23 @@ class ResolverManager:
             context.txid if context.txid is not None else "-",
             context.query_name or "-",
             context.query_type or "-",
-            benchmark_result.selected_ip or "-",
+            ", ".join(benchmark_result.selected_ips) or "-",
             (
                 f"{benchmark_result.selected_ip_rtt_ms:.2f}ms"
                 if benchmark_result.selected_ip_rtt_ms is not None
                 else "-"
             ),
         )
-        return benchmark_result.response
+        return benchmark_result.rcode, benchmark_result.answer
 
     async def _resolve_single(
         self,
         context: QueryContext,
-        query: dns.message.Message,
         started_at: float,
         resolver: ResolverProtocol,
-    ) -> dns.message.Message:
+    ) -> DnsAnswer:
         try:
-            response = await resolver.resolve(context, query)
+            rcode, answer = await resolver.resolve(context)
         except Exception as exc:  # pragma: no cover
             context.resolve_rtt_ms = (monotonic() - started_at) * 1000
             context.resolver_errors = [f"{resolver.name}: {exc}"]
@@ -259,28 +255,26 @@ class ResolverManager:
                 context.query_type or "-",
                 exc,
             )
-            return self._make_servfail(query)
+            return _make_servfail()
 
         total_ms = (monotonic() - started_at) * 1000
         context.selected_resolver = resolver.name
         context.resolve_rtt_ms = total_ms
         context.resolver_errors = []
+        context.selected_ips = []
+        context.selected_ip = None
+        context.selected_ip_rtt_ms = None
         context.tags["resolver_winner"] = resolver.name
-        return response
+        return rcode, answer
 
     async def _resolve_fastest(
         self,
         context: QueryContext,
-        query: dns.message.Message,
         started_at: float,
         resolvers: Sequence[ResolverProtocol],
-    ) -> dns.message.Message:
+    ) -> DnsAnswer:
         try:
-            race_result = await resolve_fastest(
-                resolvers=resolvers,
-                context=context,
-                query=query,
-            )
+            race_result = await resolve_fastest(resolvers=resolvers, context=context)
         except Exception as exc:  # pragma: no cover
             context.resolve_rtt_ms = (monotonic() - started_at) * 1000
             context.resolver_errors = [str(exc)]
@@ -291,11 +285,14 @@ class ResolverManager:
                 context.query_type or "-",
                 exc,
             )
-            return self._make_servfail(query)
+            return _make_servfail()
 
         context.selected_resolver = race_result.winner.name
         context.resolve_rtt_ms = race_result.elapsed_ms
         context.resolver_errors = list(race_result.errors)
+        context.selected_ips = []
+        context.selected_ip = None
+        context.selected_ip_rtt_ms = None
         context.tags["resolver_winner"] = race_result.winner.name
         if race_result.errors:
             context.tags["resolver_failures"] = list(race_result.errors)
@@ -308,13 +305,11 @@ class ResolverManager:
             context.query_name or "-",
             context.query_type or "-",
         )
-        return race_result.response
+        return race_result.rcode, race_result.answer
 
-    @staticmethod
-    def _make_servfail(query: dns.message.Message) -> dns.message.Message:
-        response = dns.message.make_response(query)
-        response.set_rcode(dns.rcode.SERVFAIL)
-        return response
+
+def _make_servfail() -> DnsAnswer:
+    return dns.rcode.SERVFAIL, []
 
 
 def _build_resolver_key(index: int, resolver: ResolverProtocol) -> str:
@@ -334,8 +329,6 @@ def _insert_resolver(
     table[candidate] = resolver
 
 
-def _should_enable_ip_benchmark(query: dns.message.Message) -> bool:
-    if len(query.question) != 1:
-        return False
-    rdtype = query.question[0].rdtype
-    return rdtype in (dns.rdatatype.A, dns.rdatatype.AAAA)
+def _should_enable_ip_benchmark(context: QueryContext) -> bool:
+    qtype = (context.query_type or "").strip().upper()
+    return qtype in ("A", "AAAA")

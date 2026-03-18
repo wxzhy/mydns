@@ -16,6 +16,7 @@ def build_hooks(
     domainset: DomainSet | None = None,
     ipset: IPSet | None = None,
     ad_block_tags: Iterable[str] | None = None,
+    ip_benchmark_top_n: int = 3,
     enable_debug: bool = True,
 ) -> tuple[object, ...]:
     """按阶段构建 hook 列表，便于统一装配与扩展。"""
@@ -25,6 +26,7 @@ def build_hooks(
         domainset=domainset,
         ipset=ipset,
         ad_block_tags=ad_block_tags,
+        ip_benchmark_top_n=ip_benchmark_top_n,
         enable_debug=enable_debug,
     )
     upstream_hooks: tuple[UpstreamHook, ...] = build_upstream_hooks(

@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import asyncio
 
-import dns.message
 import dns.rcode
 import dns.rdatatype
+import dns.rrset
 
 from core.context import QueryContext
 from core.hooks import UpstreamHook
@@ -25,22 +25,22 @@ class IpBenchmarkUpstreamHook(UpstreamHook):
     async def after_upstream(
         self,
         context: QueryContext,
-        query: dns.message.Message,
-        response: dns.message.Message,
+        rcode: dns.rcode.Rcode,
+        answer: list[dns.rrset.RRset],
         resolver_name: str,
-    ) -> dns.message.Message | None:
-        if not _is_supported_query(context, query):
-            return None
-        if response.rcode() != dns.rcode.NOERROR:
-            return None
+    ) -> None:
+        if not _is_supported_query(context):
+            return
+        if rcode != dns.rcode.NOERROR:
+            return
 
-        response_ips = _extract_response_ips(response)
+        response_ips = _extract_answer_ips(answer)
         if not response_ips:
-            return None
+            return
 
         new_ips = await _add_new_candidate_ips(context, response_ips)
         if not new_ips:
-            return None
+            return
 
         probe_results = await asyncio.gather(
             *(self._probe_ip(ip) for ip in new_ips),
@@ -61,7 +61,6 @@ class IpBenchmarkUpstreamHook(UpstreamHook):
                 ip,
                 _fmt_rtt(rtt_ms),
             )
-        return None
 
     async def _probe_ip(self, ip: str) -> float | None:
         score = await score_ip(ip, timeout_ms=self._probe_timeout_ms)
@@ -99,23 +98,17 @@ def _get_benchmark_lock(context: QueryContext) -> asyncio.Lock:
     return lock
 
 
-def _is_supported_query(
-    context: QueryContext,
-    query: dns.message.Message,
-) -> bool:
+def _is_supported_query(context: QueryContext) -> bool:
     if context.tags.get("enable_ip_benchmark") is False:
         return False
-
     qtype = (context.query_type or "").strip().upper()
-    if not qtype and query.question:
-        qtype = dns.rdatatype.to_text(query.question[0].rdtype).upper()
     return qtype in ("A", "AAAA")
 
 
-def _extract_response_ips(response: dns.message.Message) -> tuple[str, ...]:
+def _extract_answer_ips(answer: list[dns.rrset.RRset]) -> tuple[str, ...]:
     ips: list[str] = []
     seen: set[str] = set()
-    for rrset in response.answer:
+    for rrset in answer:
         if rrset.rdtype not in (dns.rdatatype.A, dns.rdatatype.AAAA):
             continue
         for rdata in rrset:

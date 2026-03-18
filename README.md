@@ -7,6 +7,7 @@
 - 异步 UDP DNS 监听
 - 支持多协议上游 DNS 转发：`udp` / `tcp` / `dot` / `doh` / `doq` / `dnscrypt`
 - 并发请求上游并返回最快成功响应
+- A/AAAA 查询支持并发测速后回填最快多个 IP（保留 CNAME 链）
 - 内置基于 TTL 的 LRU DNS 缓存（请求前命中、完成后回写）
 - 支持 `domainset/ipset` 目录化规则，按 tag 路由请求
 - 支持按 tag 返回 `NOERROR` 空应答（可用于广告拦截）
@@ -21,6 +22,7 @@
 
 - `main.py`：进程入口与生命周期管理
 - `app.py`：应用装配
+- `docs/architecture_zh.md`：中文架构与流水线说明
 - `config.py`：配置模型、加载与校验
 - `servers/udp_server.py`：UDP 传输服务
 - `core/pipeline.py`：请求处理流水线
@@ -72,6 +74,7 @@ rules:
     - ./rulesets/ipset
   ad_block_tags:
     - ad
+  ip_benchmark_top_n: 3
 
 upstreams:
   - host: 223.5.5.5
@@ -128,6 +131,7 @@ upstreams:
 - `rules.domainset_dirs`：域名规则目录列表；每个 `.txt` 文件名即 tag，内容为域名规则
 - `rules.ipset_dirs`：IP 规则目录列表；每个 `.txt` 文件名即 tag，内容为 IP/CIDR 规则
 - `rules.ad_block_tags`：命中这些 tag 时，直接返回 `NOERROR` 空应答
+- `rules.ip_benchmark_top_n`：A/AAAA 并发测速后保留的最快 IP 数量
 
 使用自定义配置文件：
 

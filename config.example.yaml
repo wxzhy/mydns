@@ -29,6 +29,8 @@ rules:
   # 命中这些 tag 时，直接返回 NOERROR 空结果（广告拦截常用）
   ad_block_tags:
     - ad
+  # A/AAAA 查询并发后，按测速结果保留的最快 IP 数量
+  ip_benchmark_top_n: 3
 
 upstreams:
   # ----------------------------

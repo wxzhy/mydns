@@ -23,6 +23,7 @@ class Application:
                 domainset=domainset,
                 ipset=ipset,
                 ad_block_tags=config.rules.ad_block_tags,
+                ip_benchmark_top_n=config.rules.ip_benchmark_top_n,
             )
         )
         resolver = ResolverManager.from_upstreams(config.upstreams, hooks=hooks)
