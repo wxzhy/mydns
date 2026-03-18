@@ -84,6 +84,53 @@ class TestSpeedcheckHooks(unittest.IsolatedAsyncioTestCase):
         await hook.on_response(ctx)
         self.assertEqual(ctx.final_answer.rrsets[0][0].to_text(), "\"hello\"")
 
+    async def test_response_hook_build_base_answer_when_final_missing(self) -> None:
+        hook = RewriteAnswerByRTTHook(max_return_ips=2)
+        ctx = _make_ctx(dns.rdatatype.TXT)
+        txt_fast = dns.rrset.from_text("www.example.com.", 30, "IN", "TXT", "\"fast\"")
+        txt_slow = dns.rrset.from_text("www.example.com.", 30, "IN", "TXT", "\"slow\"")
+        ctx.candidates = [
+            ResolverResult(
+                resolver_name="slow",
+                answer=Answer(rcode=dns.rcode.NOERROR, rrsets=[txt_slow]),
+                elapsed_ms=50.0,
+            ),
+            ResolverResult(
+                resolver_name="fast",
+                answer=Answer(rcode=dns.rcode.NOERROR, rrsets=[txt_fast]),
+                elapsed_ms=10.0,
+            ),
+        ]
+
+        await hook.on_response(ctx)
+
+        self.assertIsNotNone(ctx.final_answer)
+        self.assertEqual(ctx.final_answer.rcode, dns.rcode.NOERROR)
+        self.assertEqual(ctx.final_answer.rrsets[0][0].to_text(), "\"fast\"")
+
+    async def test_response_hook_backfill_when_target_rrset_missing(self) -> None:
+        hook = RewriteAnswerByRTTHook(max_return_ips=2, ttl_s=900)
+        ctx = _make_ctx(dns.rdatatype.A)
+        cname = dns.rrset.from_text(
+            "www.example.com.",
+            30,
+            "IN",
+            "CNAME",
+            "edge.example.com.",
+        )
+        ctx.final_answer = Answer(rcode=dns.rcode.NOERROR, rrsets=[cname])
+        ctx.ip_list.results = {
+            "1.1.1.1": 5.0,
+            "2.2.2.2": 10.0,
+        }
+
+        await hook.on_response(ctx)
+
+        a_rrset = [x for x in ctx.final_answer.rrsets if x.rdtype == dns.rdatatype.A][0]
+        self.assertEqual(a_rrset.name.to_text(), "edge.example.com.")
+        self.assertEqual([rdata.to_text() for rdata in a_rrset], ["1.1.1.1", "2.2.2.2"])
+        self.assertEqual(a_rrset.ttl, 900)
+
     async def test_duplicate_ips_probe_once_per_request(self) -> None:
         calls: list[list[str]] = []
 

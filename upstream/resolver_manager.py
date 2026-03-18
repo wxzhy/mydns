@@ -94,9 +94,10 @@ class ResolverManager:
                         repr(processed.error) if processed.error else None,
                     )
                     if not wait_all and _is_normal_result(processed):
+                        ctx.final_answer = processed.answer
                         should_stop = True
                         logger.debug(
-                            "非A/AAAA已获得首个正常结果 resolver=%s，提前结束等待",
+                            "非A/AAAA已获得首个正常结果 resolver=%s，写入final_answer并提前结束等待",
                             processed.resolver_name,
                         )
                         break

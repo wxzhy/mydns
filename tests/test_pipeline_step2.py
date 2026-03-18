@@ -12,6 +12,7 @@ from core.context import QueryContext
 from core.hooks import RequestHook, ResponseHook
 from core.models import Answer, Query
 from core.pipeline import Pipeline
+from plugins.speedcheck import RewriteAnswerByRTTHook
 from resolver.resolver import Resolver
 
 
@@ -74,7 +75,7 @@ class TestPipelineStep2(unittest.IsolatedAsyncioTestCase):
         pipeline = Pipeline(
             resolvers=[_TrackResolver(events, Answer(rcode=dns.rcode.NOERROR))],
             request_hooks=[_TrackRequestHook(events)],
-            response_hooks=[_TrackResponseHook(events)],
+            response_hooks=[RewriteAnswerByRTTHook(), _TrackResponseHook(events)],
         )
 
         answer = await pipeline.process(self.ctx)
@@ -86,7 +87,7 @@ class TestPipelineStep2(unittest.IsolatedAsyncioTestCase):
         pipeline = Pipeline(
             resolvers=[_FailIfCalledResolver()],
             request_hooks=[_TrackRequestHook(events, stop=True)],
-            response_hooks=[_TrackResponseHook(events)],
+            response_hooks=[RewriteAnswerByRTTHook(), _TrackResponseHook(events)],
         )
 
         answer = await pipeline.process(self.ctx)
@@ -98,7 +99,7 @@ class TestPipelineStep2(unittest.IsolatedAsyncioTestCase):
         pipeline = Pipeline(
             resolvers=[],
             request_hooks=[_TrackRequestHook(events)],
-            response_hooks=[_TrackResponseHook(events)],
+            response_hooks=[RewriteAnswerByRTTHook(), _TrackResponseHook(events)],
         )
 
         answer = await pipeline.process(self.ctx)

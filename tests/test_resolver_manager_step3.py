@@ -176,6 +176,8 @@ class TestResolverManagerStep3(unittest.IsolatedAsyncioTestCase):
         self.assertLess(duration, 0.18)
         self.assertIn("fast-good", names)
         self.assertNotIn("slow-good", names)
+        self.assertIsNotNone(ctx.final_answer)
+        self.assertEqual(ctx.final_answer.rcode, dns.rcode.NOERROR)
 
     async def test_a_waits_all_resolver_and_hook(self) -> None:
         ctx = self._new_ctx(dns.rdatatype.A)

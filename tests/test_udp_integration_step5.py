@@ -13,6 +13,7 @@ import dns.rrset
 
 from core.models import Answer, Query
 from core.pipeline import Pipeline
+from plugins.speedcheck import RewriteAnswerByRTTHook
 from resolver.resolver import Resolver
 from server.udp_server import UDPDNSServer
 
@@ -38,7 +39,10 @@ class _StaticResolver(Resolver):
 
 class TestUDPIntegrationStep5(unittest.IsolatedAsyncioTestCase):
     async def test_udp_query_round_trip(self) -> None:
-        pipeline = Pipeline(resolvers=[_StaticResolver()])
+        pipeline = Pipeline(
+            resolvers=[_StaticResolver()],
+            response_hooks=[RewriteAnswerByRTTHook()],
+        )
         server = UDPDNSServer(pipeline=pipeline, host="127.0.0.1", port=0)
         await server.start()
         try:

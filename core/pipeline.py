@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import dns.rcode
+
 from core.context import QueryContext
 from core.hooks import RequestHook, ResolverHook, ResponseHook
 from core.models import Answer
 from logger import get_logger
 from resolver.resolver import Resolver
 from upstream.resolver_manager import ResolverManager
-from upstream.selector import select_best_answer
 
 
 logger = get_logger("core.pipeline")
@@ -50,10 +51,9 @@ class Pipeline:
         else:
             logger.debug("请求被request hook短路 qname=%s", ctx.query.qname.to_text())
 
+        await self._run_response_hooks(ctx)
         if ctx.final_answer is None:
             ctx.final_answer = self._fallback_answer(ctx)
-
-        await self._run_response_hooks(ctx)
         logger.debug(
             "响应完成 qname=%s qtype=%s rcode=%s rrset_count=%s candidate_count=%s",
             ctx.query.qname.to_text(),
@@ -79,7 +79,7 @@ class Pipeline:
 
     def _fallback_answer(self, ctx: QueryContext) -> Answer:
         logger.debug(
-            "开始选择基础结果 qname=%s qtype=%s candidates=%s",
+            "响应阶段未生成最终答案，返回SERVFAIL qname=%s qtype=%s candidates=%s",
             ctx.query.qname.to_text(),
             ctx.query.qtype,
             [
@@ -92,4 +92,4 @@ class Pipeline:
                 for item in ctx.candidates
             ],
         )
-        return select_best_answer(ctx)
+        return Answer(rcode=dns.rcode.SERVFAIL)

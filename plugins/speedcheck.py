@@ -4,15 +4,19 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 
+import dns.rcode
+import dns.name
 import dns.rdata
+import dns.rdataclass
 import dns.rdatatype
 import dns.rrset
 
 from core.context import QueryContext
 from core.hooks import ResolverHook, ResponseHook
-from core.models import ResolverResult
+from core.models import Answer, ResolverResult
 from logger import get_logger
 from plugins.utils.speedcheck import probe_ips
+from upstream.selector import select_best_answer
 
 
 logger = get_logger("plugins.speedcheck")
@@ -95,7 +99,7 @@ class SpeedCheckResolverHook(ResolverHook):
 
 
 class RewriteAnswerByRTTHook(ResponseHook):
-    """按测速结果改写 A/AAAA 响应中的 IP 顺序与集合。"""
+    """在响应阶段构造基础答案，并按 RTT 回填 A/AAAA RRSet。"""
 
     def __init__(
         self,
@@ -106,9 +110,26 @@ class RewriteAnswerByRTTHook(ResponseHook):
         self.ttl_s = max(600, min(900, ttl_s))
 
     async def on_response(self, ctx: QueryContext) -> None:
+        if ctx.final_answer is None:
+            logger.debug(
+                "响应基础构造 qname=%s qtype=%s candidates=%s",
+                ctx.query.qname.to_text(),
+                ctx.query.qtype,
+                len(ctx.candidates),
+            )
+            ctx.final_answer = select_best_answer(ctx)
+
         answer = ctx.final_answer
         if answer is None:
             logger.debug("响应改写跳过 qname=%s reason=no_final_answer", ctx.query.qname.to_text())
+            return
+        if answer.rcode != dns.rcode.NOERROR:
+            logger.debug(
+                "响应改写跳过 qname=%s qtype=%s reason=rcode_not_noerror rcode=%s",
+                ctx.query.qname.to_text(),
+                ctx.query.qtype,
+                answer.rcode,
+            )
             return
         if ctx.query.qtype not in {dns.rdatatype.A, dns.rdatatype.AAAA}:
             logger.debug(
@@ -127,49 +148,62 @@ class RewriteAnswerByRTTHook(ResponseHook):
             )
             return
 
-        target_rrsets = [x for x in answer.rrsets if x.rdtype == ctx.query.qtype]
-        if not target_rrsets:
-            logger.debug(
-                "响应改写跳过 qname=%s qtype=%s reason=no_target_rrset",
-                ctx.query.qname.to_text(),
-                ctx.query.qtype,
-            )
-            return
-
-        rrset = target_rrsets[0]
-        original_count = max(1, len(rrset))
-        limit = min(self.max_return_ips, original_count)
         ranked_ips = [ip for ip, _ in sorted(ip_rtt.items(), key=lambda item: item[1])]
         if not ranked_ips:
             return
 
-        selected_ips = ranked_ips[:limit]
-        old_ips = [rdata.to_text() for rdata in rrset]
-        cname_count = sum(1 for x in answer.rrsets if x.rdtype == dns.rdatatype.CNAME)
-        rewritten = dns.rrset.RRset(rrset.name, rrset.rdclass, rrset.rdtype)
-        rewritten.ttl = self.ttl_s
-        for ip in selected_ips:
-            rdata = dns.rdata.from_text(rrset.rdclass, rrset.rdtype, ip)
-            rewritten.add(rdata, rewritten.ttl)
+        target_rrsets = [x for x in answer.rrsets if x.rdtype == ctx.query.qtype]
+        if target_rrsets:
+            rrset = target_rrsets[0]
+            original_count = max(1, len(rrset))
+            limit = min(self.max_return_ips, original_count, len(ranked_ips))
+            selected_ips = ranked_ips[:limit]
+            old_ips = [rdata.to_text() for rdata in rrset]
+            owner_name = rrset.name
+            rdclass = rrset.rdclass
+            backfilled = False
+        else:
+            limit = min(self.max_return_ips, len(ranked_ips))
+            selected_ips = ranked_ips[:limit]
+            old_ips = []
+            owner_name, rdclass = _resolve_owner_name_and_class(ctx, answer)
+            backfilled = True
 
-        new_rrsets: list[dns.rrset.RRset] = []
-        replaced = False
-        for item in answer.rrsets:
-            if item.rdtype == ctx.query.qtype:
-                if not replaced:
-                    new_rrsets.append(rewritten)
-                    replaced = True
-                continue
-            new_rrsets.append(item)
-        answer.rrsets = new_rrsets
+        if not selected_ips:
+            return
+
+        cname_count = sum(1 for x in answer.rrsets if x.rdtype == dns.rdatatype.CNAME)
+        rewritten = _build_ip_rrset(
+            owner_name=owner_name,
+            rdclass=rdclass,
+            qtype=ctx.query.qtype,
+            ips=selected_ips,
+            ttl_s=self.ttl_s,
+        )
+
+        if target_rrsets:
+            new_rrsets: list[dns.rrset.RRset] = []
+            replaced = False
+            for item in answer.rrsets:
+                if item.rdtype == ctx.query.qtype:
+                    if not replaced:
+                        new_rrsets.append(rewritten)
+                        replaced = True
+                    continue
+                new_rrsets.append(item)
+            answer.rrsets = new_rrsets
+        else:
+            answer.rrsets.append(rewritten)
+
         logger.debug(
-            "响应IP改写 qname=%s qtype=%s cname_count=%s old_ips=%s new_ips=%s ttl=%s rtt=%s",
+            "响应IP改写 qname=%s qtype=%s cname_count=%s old_ips=%s new_ips=%s ttl=%s backfilled=%s rtt=%s",
             ctx.query.qname.to_text(),
             ctx.query.qtype,
             cname_count,
             old_ips,
             selected_ips,
             rewritten.ttl,
+            backfilled,
             ip_rtt,
         )
 
@@ -184,3 +218,33 @@ def _extract_ips(rrsets: list[dns.rrset.RRset], qtype: dns.rdatatype.RdataType) 
             if text not in ips:
                 ips.append(text)
     return ips
+
+
+def _resolve_owner_name_and_class(
+    ctx: QueryContext,
+    answer: Answer,
+) -> tuple[dns.name.Name, dns.rdataclass.RdataClass]:
+    rrsets = answer.rrsets
+    cname_rrsets = [item for item in rrsets if item.rdtype == dns.rdatatype.CNAME]
+    if cname_rrsets:
+        last = cname_rrsets[-1]
+        first_cname = next(iter(last), None)
+        if first_cname is not None and hasattr(first_cname, "target"):
+            return first_cname.target, last.rdclass
+        return last.name, last.rdclass
+    return ctx.query.qname, dns.rdataclass.IN
+
+
+def _build_ip_rrset(
+    owner_name: dns.name.Name,
+    rdclass: dns.rdataclass.RdataClass,
+    qtype: dns.rdatatype.RdataType,
+    ips: list[str],
+    ttl_s: int,
+) -> dns.rrset.RRset:
+    rrset = dns.rrset.RRset(owner_name, rdclass, qtype)
+    rrset.ttl = ttl_s
+    for ip in ips:
+        rdata = dns.rdata.from_text(rdclass, qtype, ip)
+        rrset.add(rdata, rrset.ttl)
+    return rrset
