@@ -1,16 +1,20 @@
-"""请求上下文"""
+"""请求上下文定义。"""
 
-from dataclasses import dataclass
-from core.models import Query, Answer, IPList
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any
+
+from core.models import Answer, Query, ResolverResult
 
 
 @dataclass(slots=True)
-class Context:
-    """DNS查询上下文"""
+class QueryContext:
+    """DNS 查询在流水线中的运行态。"""
 
     query: Query
-    answer: Answer | None = None
-    # IP候选列表
-    ip_list: IPList | None = None
-    # 请求标记
-    tags: str = "default"
+    final_answer: Answer | None = None
+    candidates: list[ResolverResult] = field(default_factory=list)
+    tags: set[str] = field(default_factory=lambda: {"default"})
+    state: dict[str, Any] = field(default_factory=dict)
+    stop: bool = False

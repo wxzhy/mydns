@@ -1,31 +1,38 @@
-from dataclasses import dataclass
+"""核心数据模型定义。"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+import dns.edns
 import dns.name
 import dns.rdatatype
-import dns.edns
 import dns.rrset
 
 
 @dataclass(slots=True)
 class Query:
-    """请求信息"""
+    """DNS 请求抽象。"""
 
-    txid: int
+    client_addr: tuple[str, int] | None
     qname: dns.name.Name
     qtype: dns.rdatatype.RdataType
-    ecs: dns.edns.ECSOption | None
+    ecs: dns.edns.ECSOption | None = None
 
 
 @dataclass(slots=True)
 class Answer:
-    """响应信息"""
+    """DNS 响应抽象。"""
 
     rcode: int
-    rrset: list[dns.rrset.RRset] | None
+    rrsets: list[dns.rrset.RRset] = field(default_factory=list)
 
 
 @dataclass(slots=True)
-class IPList:
-    """IP候选"""
+class ResolverResult:
+    """单个上游解析器的结果。"""
 
-    ips: list[str]
-    results: dict[str, float | None]
+    resolver_name: str
+    answer: Answer | None
+    elapsed_ms: float | None
+    error: Exception | None = None
