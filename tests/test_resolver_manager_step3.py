@@ -64,6 +64,33 @@ class _RewriteRcodeHook(ResolverHook):
         return result
 
 
+class _TimingHook(ResolverHook):
+    def __init__(self) -> None:
+        self.first_called_at: float | None = None
+        self.total_calls = 0
+
+    async def on_resolver_result(
+        self,
+        ctx: QueryContext,
+        result: ResolverResult,
+    ) -> ResolverResult | None:
+        _ = ctx
+        self.total_calls += 1
+        if self.first_called_at is None:
+            self.first_called_at = time.perf_counter()
+        return result
+
+
+class _RaiseHook(ResolverHook):
+    async def on_resolver_result(
+        self,
+        ctx: QueryContext,
+        result: ResolverResult,
+    ) -> ResolverResult | None:
+        _ = ctx, result
+        raise RuntimeError("hook boom")
+
+
 class TestResolverManagerStep3(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.ctx = self._new_ctx(dns.rdatatype.A)
@@ -131,12 +158,13 @@ class TestResolverManagerStep3(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.ctx.candidates[0].resolver_name, "good")
         self.assertEqual(self.ctx.candidates[0].answer.rcode, dns.rcode.NOERROR)
 
-    async def test_non_a_returns_first_non_exception(self) -> None:
+    async def test_non_a_returns_first_normal(self) -> None:
         ctx = self._new_ctx(dns.rdatatype.TXT)
         manager = ResolverManager(
             resolvers=[
                 _SleepResolver("fast-error", delay_s=0.01, error=RuntimeError("err")),
-                _SleepResolver("fast-good", delay_s=0.03, answer=Answer(rcode=dns.rcode.NOERROR)),
+                _SleepResolver("fast-nxd", delay_s=0.02, answer=Answer(rcode=dns.rcode.NXDOMAIN)),
+                _SleepResolver("fast-good", delay_s=0.05, answer=Answer(rcode=dns.rcode.NOERROR)),
                 _SleepResolver("slow-good", delay_s=0.2, answer=Answer(rcode=dns.rcode.NOERROR)),
             ]
         )
@@ -145,7 +173,7 @@ class TestResolverManagerStep3(unittest.IsolatedAsyncioTestCase):
         duration = time.perf_counter() - start
 
         names = [x.resolver_name for x in ctx.candidates]
-        self.assertLess(duration, 0.15)
+        self.assertLess(duration, 0.18)
         self.assertIn("fast-good", names)
         self.assertNotIn("slow-good", names)
 
@@ -163,6 +191,41 @@ class TestResolverManagerStep3(unittest.IsolatedAsyncioTestCase):
 
         self.assertGreaterEqual(duration, 0.14)
         self.assertEqual({x.resolver_name for x in ctx.candidates}, {"fast", "slow"})
+
+    async def test_slow_resolver_not_block_fast_hook_execution(self) -> None:
+        ctx = self._new_ctx(dns.rdatatype.A)
+        timing_hook = _TimingHook()
+        manager = ResolverManager(
+            resolvers=[
+                _SleepResolver("fast", delay_s=0.02, answer=Answer(rcode=dns.rcode.NOERROR)),
+                _SleepResolver("slow", delay_s=0.20, answer=Answer(rcode=dns.rcode.NOERROR)),
+            ],
+            resolver_hooks=[timing_hook],
+        )
+        start = time.perf_counter()
+        await manager.collect(ctx, timeout_s=0.5)
+        end = time.perf_counter()
+
+        self.assertEqual(timing_hook.total_calls, 2)
+        self.assertIsNotNone(timing_hook.first_called_at)
+        first_latency = timing_hook.first_called_at - start
+        total_latency = end - start
+        self.assertLess(first_latency, 0.08)
+        self.assertGreater(total_latency, 0.18)
+
+    async def test_hook_exception_should_not_break_request(self) -> None:
+        manager = ResolverManager(
+            resolvers=[
+                _SleepResolver("good", delay_s=0.01, answer=Answer(rcode=dns.rcode.NOERROR)),
+            ],
+            resolver_hooks=[_RaiseHook()],
+        )
+
+        await manager.collect(self.ctx, timeout_s=0.2)
+        self.assertEqual(len(self.ctx.candidates), 1)
+        self.assertEqual(self.ctx.candidates[0].resolver_name, "good")
+        self.assertIsNotNone(self.ctx.candidates[0].answer)
+        self.assertEqual(self.ctx.candidates[0].answer.rcode, dns.rcode.NOERROR)
 
 
 if __name__ == "__main__":

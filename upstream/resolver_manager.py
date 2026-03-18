@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 
+import dns.rcode
 import dns.rdatatype
 
 from core.context import QueryContext
@@ -44,6 +45,15 @@ class ResolverManager:
         if not matched:
             return
 
+        for resolver in matched:
+            logger.debug(
+                "并发调度 resolver=%s qname=%s qtype=%s timeout=%.3fs",
+                resolver.name,
+                ctx.query.qname.to_text(),
+                ctx.query.qtype,
+                timeout_s,
+            )
+
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout_s
         pending = {
@@ -55,6 +65,12 @@ class ResolverManager:
         while pending:
             remaining = deadline - loop.time()
             if remaining <= 0:
+                logger.debug(
+                    "上游等待超时 qname=%s qtype=%s pending=%s",
+                    ctx.query.qname.to_text(),
+                    ctx.query.qtype,
+                    len(pending),
+                )
                 break
 
             done, pending = await asyncio.wait(
@@ -77,10 +93,10 @@ class ResolverManager:
                         processed.answer.rcode if processed.answer else None,
                         repr(processed.error) if processed.error else None,
                     )
-                    if not wait_all and _is_non_exception_result(processed):
+                    if not wait_all and _is_normal_result(processed):
                         should_stop = True
                         logger.debug(
-                            "非A/AAAA已获得首个可用结果 resolver=%s，提前结束等待",
+                            "非A/AAAA已获得首个正常结果 resolver=%s，提前结束等待",
                             processed.resolver_name,
                         )
                         break
@@ -96,6 +112,12 @@ class ResolverManager:
             task.cancel()
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
+            logger.debug(
+                "已取消未完成上游任务 qname=%s qtype=%s canceled=%s",
+                ctx.query.qname.to_text(),
+                ctx.query.qtype,
+                len(pending),
+            )
 
     @staticmethod
     def _resolver_match_tags(resolver: Resolver, tags: set[str]) -> bool:
@@ -110,15 +132,36 @@ class ResolverManager:
         timeout_s: float,
     ) -> ResolverResult:
         start = time.perf_counter()
+        logger.debug(
+            "上游请求开始 resolver=%s qname=%s qtype=%s",
+            resolver.name,
+            ctx.query.qname.to_text(),
+            ctx.query.qtype,
+        )
         try:
             answer = await asyncio.wait_for(
                 resolver.resolve(ctx.query, timeout_s),
                 timeout=timeout_s,
             )
             error: Exception | None = None
+            logger.debug(
+                "收到上游响应 resolver=%s qname=%s qtype=%s rcode=%s rrset_count=%s",
+                resolver.name,
+                ctx.query.qname.to_text(),
+                ctx.query.qtype,
+                answer.rcode,
+                len(answer.rrsets),
+            )
         except Exception as exc:
             answer = None
             error = exc
+            logger.debug(
+                "上游请求异常 resolver=%s qname=%s qtype=%s err=%r",
+                resolver.name,
+                ctx.query.qname.to_text(),
+                ctx.query.qtype,
+                exc,
+            )
         elapsed_ms = (time.perf_counter() - start) * 1000
         return ResolverResult(
             resolver_name=resolver.name,
@@ -136,7 +179,17 @@ class ResolverManager:
         for hook in self.resolver_hooks:
             if current is None:
                 return None
-            current = await hook.on_resolver_result(ctx, current)
+            try:
+                current = await hook.on_resolver_result(ctx, current)
+            except Exception:
+                # 单个 hook 异常不应影响整个请求流程，保留当前结果继续后续处理。
+                logger.exception(
+                    "resolver hook异常，已忽略 resolver=%s hook=%s qname=%s qtype=%s",
+                    current.resolver_name,
+                    hook.__class__.__name__,
+                    ctx.query.qname.to_text(),
+                    ctx.query.qtype,
+                )
         return current
 
 
@@ -144,5 +197,9 @@ def _need_wait_all_results(qtype: dns.rdatatype.RdataType) -> bool:
     return qtype in {dns.rdatatype.A, dns.rdatatype.AAAA}
 
 
-def _is_non_exception_result(result: ResolverResult) -> bool:
-    return result.error is None and result.answer is not None
+def _is_normal_result(result: ResolverResult) -> bool:
+    return (
+        result.error is None
+        and result.answer is not None
+        and result.answer.rcode == dns.rcode.NOERROR
+    )
