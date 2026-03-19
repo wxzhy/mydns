@@ -104,7 +104,7 @@ class TestMultiResolversAndTricks(unittest.IsolatedAsyncioTestCase):
             dns.asyncquery.https = original
 
         self.assertEqual(answer.rcode, dns.rcode.NOERROR)
-        self.assertEqual(captured["kwargs"]["where"], "dns.example")
+        self.assertEqual(captured["kwargs"]["where"], "https://dns.example")
         self.assertEqual(captured["kwargs"]["path"], "/dns-query")
         self.assertEqual(captured["kwargs"]["bootstrap_address"], "1.1.1.1")
 

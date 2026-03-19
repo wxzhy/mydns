@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
 import unittest
 
 import dns.name
@@ -159,6 +161,29 @@ class TestSpeedcheckHooks(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls[0], ["1.1.1.1", "2.2.2.2"])
         self.assertEqual(calls[1], ["3.3.3.3"])
         self.assertEqual(len(calls), 2)
+
+    async def test_probe_timeout_should_not_break_request(self) -> None:
+        async def slow_probe(ips: list[str], timeout_s: float) -> dict[str, float | None]:
+            _ = ips, timeout_s
+            await asyncio.sleep(0.2)
+            return {}
+
+        hook = SpeedCheckResolverHook(timeout_s=0.05, probe_func=slow_probe)
+        ctx = _make_ctx(dns.rdatatype.A)
+        result = ResolverResult(
+            resolver_name="r1",
+            answer=_make_a_answer("1.1.1.1"),
+            elapsed_ms=5.0,
+        )
+
+        start = time.perf_counter()
+        output = await hook.on_resolver_result(ctx, result)
+        duration = time.perf_counter() - start
+
+        self.assertIs(output, result)
+        self.assertLess(duration, 0.12)
+        self.assertIn("1.1.1.1", ctx.ip_list.results)
+        self.assertIsNone(ctx.ip_list.results["1.1.1.1"])
 
 
 if __name__ == "__main__":

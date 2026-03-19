@@ -25,9 +25,11 @@ class ResolverManager:
         self,
         resolvers: list[Resolver] | None = None,
         resolver_hooks: list[ResolverHook] | None = None,
+        resolver_hook_timeout_s: float = 0.25,
     ) -> None:
         self.resolvers = resolvers or []
         self.resolver_hooks = resolver_hooks or []
+        self.resolver_hook_timeout_s = max(0.01, resolver_hook_timeout_s)
 
     async def collect(self, ctx: QueryContext, timeout_s: float) -> None:
         """并发收集上游结果，并写入 ctx.candidates。"""
@@ -59,40 +61,30 @@ class ResolverManager:
             for resolver in matched
         ]
 
-        try:
-            async with asyncio.timeout(timeout_s):
-                for completed in asyncio.as_completed(tasks):
-                    result = await completed
-                    processed = await self._run_resolver_hooks(ctx, result)
-                    if processed is not None:
-                        ctx.candidates.append(processed)
-                        logger.debug(
-                            "上游结果保留 resolver=%s elapsed_ms=%.2f rcode=%s error=%s",
-                            processed.resolver_name,
-                            processed.elapsed_ms or -1,
-                            processed.answer.rcode if processed.answer else None,
-                            repr(processed.error) if processed.error else None,
-                        )
-                        if not wait_all and _is_normal_result(processed):
-                            ctx.final_answer = processed.answer
-                            logger.debug(
-                                "非A/AAAA已获得首个正常结果 resolver=%s，写入final_answer并提前结束等待",
-                                processed.resolver_name,
-                            )
-                            break
-                    else:
-                        logger.debug(
-                            "上游结果被hook丢弃 resolver=%s",
-                            result.resolver_name,
-                        )
-        except TimeoutError:
-            pending_count = sum(1 for task in tasks if not task.done())
-            logger.debug(
-                "上游等待超时 qname=%s qtype=%s pending=%s",
-                ctx.query.qname.to_text(),
-                ctx.query.qtype,
-                pending_count,
-            )
+        for completed in asyncio.as_completed(tasks):
+            result = await completed
+            processed = await self._run_resolver_hooks(ctx, result)
+            if processed is not None:
+                ctx.candidates.append(processed)
+                logger.debug(
+                    "上游结果保留 resolver=%s elapsed_ms=%.2f rcode=%s error=%s",
+                    processed.resolver_name,
+                    processed.elapsed_ms or -1,
+                    processed.answer.rcode if processed.answer else None,
+                    repr(processed.error) if processed.error else None,
+                )
+                if not wait_all and _is_normal_result(processed):
+                    ctx.final_answer = processed.answer
+                    logger.debug(
+                        "非A/AAAA已获得首个正常结果 resolver=%s，写入final_answer并提前结束等待",
+                        processed.resolver_name,
+                    )
+                    break
+            else:
+                logger.debug(
+                    "上游结果被hook丢弃 resolver=%s",
+                    result.resolver_name,
+                )
 
         pending = [task for task in tasks if not task.done()]
         for task in pending:
@@ -167,7 +159,20 @@ class ResolverManager:
             if current is None:
                 return None
             try:
-                current = await hook.on_resolver_result(ctx, current)
+                current = await asyncio.wait_for(
+                    hook.on_resolver_result(ctx, current),
+                    timeout=self.resolver_hook_timeout_s,
+                )
+            except TimeoutError:
+                # 单个 hook 超时不影响本次请求，保留当前结果继续。
+                logger.debug(
+                    "resolver hook超时，已忽略 resolver=%s hook=%s qname=%s qtype=%s timeout=%.3fs",
+                    current.resolver_name,
+                    hook.__class__.__name__,
+                    ctx.query.qname.to_text(),
+                    ctx.query.qtype,
+                    self.resolver_hook_timeout_s,
+                )
             except Exception:
                 # 单个 hook 异常不应影响整个请求流程，保留当前结果继续后续处理。
                 logger.exception(

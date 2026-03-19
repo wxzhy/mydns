@@ -91,6 +91,22 @@ class _RaiseHook(ResolverHook):
         raise RuntimeError("hook boom")
 
 
+class _SlowHook(ResolverHook):
+    def __init__(self, sleep_s: float) -> None:
+        self.sleep_s = sleep_s
+
+    async def on_resolver_result(
+        self,
+        ctx: QueryContext,
+        result: ResolverResult,
+    ) -> ResolverResult | None:
+        _ = ctx
+        await asyncio.sleep(self.sleep_s)
+        if result.answer is not None:
+            result.answer.rcode = dns.rcode.NXDOMAIN
+        return result
+
+
 class TestResolverManagerStep3(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.ctx = self._new_ctx(dns.rdatatype.A)
@@ -226,6 +242,24 @@ class TestResolverManagerStep3(unittest.IsolatedAsyncioTestCase):
         await manager.collect(self.ctx, timeout_s=0.2)
         self.assertEqual(len(self.ctx.candidates), 1)
         self.assertEqual(self.ctx.candidates[0].resolver_name, "good")
+        self.assertIsNotNone(self.ctx.candidates[0].answer)
+        self.assertEqual(self.ctx.candidates[0].answer.rcode, dns.rcode.NOERROR)
+
+    async def test_hook_timeout_should_not_block_request(self) -> None:
+        manager = ResolverManager(
+            resolvers=[
+                _SleepResolver("good", delay_s=0.01, answer=Answer(rcode=dns.rcode.NOERROR)),
+            ],
+            resolver_hooks=[_SlowHook(0.2)],
+            resolver_hook_timeout_s=0.05,
+        )
+
+        start = time.perf_counter()
+        await manager.collect(self.ctx, timeout_s=0.2)
+        duration = time.perf_counter() - start
+
+        self.assertLess(duration, 0.13)
+        self.assertEqual(len(self.ctx.candidates), 1)
         self.assertIsNotNone(self.ctx.candidates[0].answer)
         self.assertEqual(self.ctx.candidates[0].answer.rcode, dns.rcode.NOERROR)
 

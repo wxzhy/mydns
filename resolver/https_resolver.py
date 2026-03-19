@@ -51,7 +51,7 @@ class HttpsUpstreamResolver(Resolver):
         request = build_request_message(query, use_edns=True)
         response = await dns.asyncquery.https(
             request,
-            where=self.address,
+            where=self._build_where(),
             timeout=timeout_s,
             port=self.port,
             source=self.source,
@@ -68,3 +68,8 @@ class HttpsUpstreamResolver(Resolver):
             rcode=response.rcode(),
             rrsets=list(response.answer),
         )
+
+    def _build_where(self) -> str:
+        if self.address.startswith(("https://", "http://")):
+            return self.address
+        return f"https://{self.address}"

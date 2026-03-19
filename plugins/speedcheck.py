@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 
 import dns.rcode
@@ -80,7 +81,31 @@ class SpeedCheckResolverHook(ResolverHook):
             ctx.ip_list.results,
         )
         if pending:
-            tested = await self.probe_func(pending, self.timeout_s)
+            try:
+                tested = await asyncio.wait_for(
+                    self.probe_func(pending, self.timeout_s),
+                    timeout=self.timeout_s,
+                )
+            except TimeoutError:
+                tested = {ip: None for ip in pending}
+                logger.debug(
+                    "测速超时 resolver=%s qname=%s qtype=%s pending=%s timeout=%.3fs",
+                    result.resolver_name,
+                    ctx.query.qname.to_text(),
+                    ctx.query.qtype,
+                    pending,
+                    self.timeout_s,
+                )
+            except Exception as exc:
+                tested = {ip: None for ip in pending}
+                logger.debug(
+                    "测速异常 resolver=%s qname=%s qtype=%s pending=%s err=%r",
+                    result.resolver_name,
+                    ctx.query.qname.to_text(),
+                    ctx.query.qtype,
+                    pending,
+                    exc,
+                )
             for ip, rtt in tested.items():
                 ctx.ip_list.results[ip] = rtt
 
