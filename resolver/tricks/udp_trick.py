@@ -14,7 +14,7 @@ async def _wait_for(awaitable: Awaitable[Any], timeout: float | None) -> Any:
     """统一超时封装。"""
     if timeout is None:
         return await awaitable
-    return await asyncio.wait_for(awaitable, timeout)
+    return await asyncio.wait_for(awaitable, timeout=timeout)
 
 
 class TrickyDatagramSocket(dns.asyncbackend.DatagramSocket):
@@ -41,7 +41,13 @@ class TrickyDatagramSocket(dns.asyncbackend.DatagramSocket):
         timeout: float | None,
     ) -> tuple[bytes, tuple[str, int]]:
         loop = asyncio.get_running_loop()
-        return await _wait_for(loop.sock_recvfrom(self._socket, size), timeout)
+        # 伪造包可能会重复发送，增加重试机制以提高成功率
+        for _ in range(5):
+            data = await _wait_for(loop.sock_recvfrom(self._socket, size), timeout)
+            # 伪造包不包含additional，此处检查
+            if len(data) > 12 and data[10:12] == b"\x00\x01":
+                return data
+        raise asyncio.TimeoutError("UDP recvfrom timeout")
 
     async def close(self) -> None:
         if self.closed:
