@@ -10,7 +10,6 @@ from resolver.quic_resolver import QuicUpstreamResolver
 from resolver.tcp_resolver import TcpUpstreamResolver
 from resolver.tls_resolver import TlsUpstreamResolver
 from resolver.udp_resolver import UdpUpstreamResolver
-from resolver.tricks import TcpTrickResolver, UdpTrickResolver
 
 
 def build_pipeline() -> Pipeline:
@@ -60,18 +59,6 @@ def build_pipeline() -> Pipeline:
             address="dns.google",
             path="/dns-query",
             bootstrap_address="8.8.8.8",
-        ),
-        UdpTrickResolver(
-            name="udp-trick-alidns",
-            address="223.5.5.5",
-            padding_bytes=24,
-            require_opt_response=True,
-        ),
-        TcpTrickResolver(
-            name="tcp-trick-cloudflare",
-            address="1.1.1.1",
-            split_at=6,
-            inter_chunk_delay_ms=5,
         ),
     ]
     return Pipeline(

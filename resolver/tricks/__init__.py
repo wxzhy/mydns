@@ -1,9 +1,9 @@
-"""自定义收发解析器集合。"""
+"""自定义 socket 工具集合。"""
 
-from resolver.tricks.tcp_trick import TcpTrickResolver
-from resolver.tricks.udp_trick import UdpTrickResolver
+from resolver.tricks.tcp_trick import TrickyStreamSocket
+from resolver.tricks.udp_trick import TrickyDatagramSocket
 
 __all__ = [
-    "TcpTrickResolver",
-    "UdpTrickResolver",
+    "TrickyStreamSocket",
+    "TrickyDatagramSocket",
 ]

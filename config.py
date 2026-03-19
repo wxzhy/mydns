@@ -39,8 +39,6 @@ _RESOLVER_TYPES: dict[str, str] = {
     "tls": "resolver.tls_resolver.TlsUpstreamResolver",
     "https": "resolver.https_resolver.HttpsUpstreamResolver",
     "quic": "resolver.quic_resolver.QuicUpstreamResolver",
-    "udp_trick": "resolver.tricks.udp_trick.UdpTrickResolver",
-    "tcp_trick": "resolver.tricks.tcp_trick.TcpTrickResolver",
 }
 
 

@@ -1,87 +1,63 @@
-"""UDP 自定义收发解析器。"""
+"""UDP 基础异步 socket。"""
 
 from __future__ import annotations
 
-import dns.asyncquery
-import dns.edns
-import dns.exception
-import dns.message
+import asyncio
+import socket
+from collections.abc import Awaitable
+from typing import Any
 
-from core.models import Answer, Query
-from resolver.resolver import Resolver, build_request_message
+import dns.asyncbackend
 
 
-class UdpTrickResolver(Resolver):
-    """通过 EDNS 增强与响应校验实现更稳健的 UDP 解析。"""
+async def _wait_for(awaitable: Awaitable[Any], timeout: float | None) -> Any:
+    """统一超时封装。"""
+    if timeout is None:
+        return await awaitable
+    return await asyncio.wait_for(awaitable, timeout)
 
-    def __init__(
+
+class TrickyDatagramSocket(dns.asyncbackend.DatagramSocket):
+    """基础 UDP 异步 socket 封装。"""
+
+    def __init__(self, family: int, sock_type: int) -> None:
+        super().__init__(family, sock_type)
+        self._socket = socket.socket(family, sock_type)
+        self._socket.setblocking(False)
+        self.closed = False
+
+    async def sendto(
         self,
-        *,
-        name: str,
-        address: str,
-        port: int = 53,
-        padding_bytes: int = 24,
-        require_opt_response: bool = True,
-        ignore_unexpected: bool = True,
-        tags: set[str] | None = None,
-    ) -> None:
-        self.name = name
-        self.address = address
-        self.port = port
-        self.padding_bytes = max(0, padding_bytes)
-        self.require_opt_response = require_opt_response
-        self.ignore_unexpected = ignore_unexpected
-        self.tags = tags or {"default"}
+        what: bytes,
+        where: tuple[str, int],
+        timeout: float | None,
+    ) -> int:
+        loop = asyncio.get_running_loop()
+        return await _wait_for(loop.sock_sendto(self._socket, what, where), timeout)
 
-    async def resolve(self, query: Query, timeout_s: float) -> Answer:
-        request = self._build_request(query)
-        response = await dns.asyncquery.udp(
-            request,
-            where=self.address,
-            port=self.port,
-            timeout=timeout_s,
-            ignore_unexpected=self.ignore_unexpected,
-        )
-        if not self._accept_response(request, response):
-            raise dns.exception.DNSException("UDP trick 检测到无效响应")
-        return Answer(
-            rcode=response.rcode(),
-            rrsets=list(response.answer),
-        )
-
-    def _build_request(self, query: Query) -> dns.message.Message:
-        request = build_request_message(query, use_edns=True)
-        if self.padding_bytes <= 0:
-            return request
-        options = list(request.options)
-        options.append(
-            dns.edns.GenericOption(
-                dns.edns.OptionType.PADDING,
-                b"\x00" * self.padding_bytes,
-            )
-        )
-        request.use_edns(
-            edns=request.edns,
-            ednsflags=request.ednsflags,
-            payload=request.payload,
-            options=options,
-        )
-        return request
-
-    def _accept_response(
+    async def recvfrom(
         self,
-        request: dns.message.Message,
-        response: dns.message.Message,
-    ) -> bool:
-        if response.id != request.id:
-            return False
-        if request.question and response.question:
-            request_question = request.question[0]
-            response_question = response.question[0]
-            if request_question.name != response_question.name:
-                return False
-            if request_question.rdtype != response_question.rdtype:
-                return False
-        if self.require_opt_response and request.opt is not None and response.opt is None:
-            return False
-        return True
+        size: int,
+        timeout: float | None,
+    ) -> tuple[bytes, tuple[str, int]]:
+        loop = asyncio.get_running_loop()
+        return await _wait_for(loop.sock_recvfrom(self._socket, size), timeout)
+
+    async def close(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        self._socket.close()
+
+    async def getpeername(self) -> tuple[str, int] | None:
+        try:
+            return self._socket.getpeername()
+        except OSError:
+            return None
+
+    async def getsockname(self) -> tuple[str, int]:
+        return self._socket.getsockname()
+
+    async def getpeercert(self, timeout: float | None) -> None:
+        _ = timeout
+        return None
