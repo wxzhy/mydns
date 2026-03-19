@@ -5,7 +5,8 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "dnspython>=2.8.0",
+    "dnspython[doh,doq]>=2.8.0",
+    "httpx>=0.28.1",
     "icmplib>=3.0.4",
     "winuvloop>=0.2.0",
 ]
