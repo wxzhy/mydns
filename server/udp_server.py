@@ -106,8 +106,8 @@ class UDPDNSServer:
                 "响应详情 qname=%s qtype=%s rcode=%s rrset_count=%s",
                 ctx.query.qname.to_text(),
                 ctx.query.qtype,
-                answer.rcode,
-                len(answer.rrsets),
+                answer.response.rcode(),
+                len(answer.response.answer),
             )
             return build_response_wire(ctx, answer)
         except dns.exception.DNSException:

@@ -70,7 +70,9 @@ class ResolverManager:
                     "上游结果保留 resolver=%s elapsed_ms=%.2f rcode=%s error=%s",
                     processed.resolver_name,
                     processed.elapsed_ms or -1,
-                    processed.answer.rcode if processed.answer else None,
+                    processed.answer.response.rcode()
+                    if processed.answer is not None
+                    else None,
                     repr(processed.error) if processed.error else None,
                 )
                 if not wait_all and _is_normal_result(processed):
@@ -128,8 +130,8 @@ class ResolverManager:
                 resolver.name,
                 ctx.query.qname.to_text(),
                 ctx.query.qtype,
-                answer.rcode,
-                len(answer.rrsets),
+                answer.response.rcode(),
+                len(answer.response.answer),
             )
         except Exception as exc:
             answer = None
@@ -193,5 +195,5 @@ def _is_normal_result(result: ResolverResult) -> bool:
     return (
         result.error is None
         and result.answer is not None
-        and result.answer.rcode == dns.rcode.NOERROR
+        and result.answer.response.rcode() == dns.rcode.NOERROR
     )

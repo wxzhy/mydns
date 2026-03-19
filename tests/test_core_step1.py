@@ -6,11 +6,13 @@ import unittest
 
 import dns.name
 import dns.rcode
+import dns.resolver
 import dns.rdatatype
 
+from core.answer import make_answer
 from core.context import QueryContext
 from core.hooks import RequestHook, ResolverHook, ResponseHook
-from core.models import Answer, Query, ResolverResult
+from core.models import Query, ResolverResult
 from resolver.resolver import Resolver
 
 
@@ -38,9 +40,9 @@ class _DummyResolver(Resolver):
     name = "dummy"
     tags = {"default"}
 
-    async def resolve(self, query: Query, timeout_s: float) -> Answer:
+    async def resolve(self, query: Query, timeout_s: float) -> dns.resolver.Answer:
         _ = query, timeout_s
-        return Answer(rcode=dns.rcode.NOERROR)
+        return make_answer(query, rcode=dns.rcode.NOERROR)
 
 
 class TestCoreStep1(unittest.IsolatedAsyncioTestCase):
@@ -51,10 +53,10 @@ class TestCoreStep1(unittest.IsolatedAsyncioTestCase):
             qtype=dns.rdatatype.A,
         )
 
-    def test_model_defaults(self) -> None:
-        answer = Answer(rcode=dns.rcode.NOERROR)
-        self.assertEqual(answer.rcode, dns.rcode.NOERROR)
-        self.assertEqual(answer.rrsets, [])
+    def test_answer_defaults(self) -> None:
+        answer = make_answer(self.query, rcode=dns.rcode.NOERROR)
+        self.assertEqual(answer.response.rcode(), dns.rcode.NOERROR)
+        self.assertEqual(answer.response.answer, [])
 
     def test_context_defaults(self) -> None:
         ctx = QueryContext(query=self.query)
@@ -89,7 +91,7 @@ class TestCoreStep1(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(ctx.state["request"])
         self.assertEqual(ctx.state["resolver_hook"], "dummy")
         self.assertTrue(ctx.state["response"])
-        self.assertEqual(ctx.final_answer.rcode, dns.rcode.NOERROR)
+        self.assertEqual(ctx.final_answer.response.rcode(), dns.rcode.NOERROR)
 
 
 if __name__ == "__main__":

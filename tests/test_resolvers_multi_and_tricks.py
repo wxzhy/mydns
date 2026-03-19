@@ -53,8 +53,8 @@ class TestMultiResolversAndTricks(unittest.IsolatedAsyncioTestCase):
         finally:
             dns.asyncquery.tcp = original
 
-        self.assertEqual(answer.rcode, dns.rcode.NOERROR)
-        self.assertEqual(len(answer.rrsets), 1)
+        self.assertEqual(answer.response.rcode(), dns.rcode.NOERROR)
+        self.assertEqual(len(answer.response.answer), 1)
         self.assertEqual(captured["kwargs"]["where"], "1.1.1.1")
         self.assertEqual(captured["kwargs"]["port"], 53)
 
@@ -78,7 +78,7 @@ class TestMultiResolversAndTricks(unittest.IsolatedAsyncioTestCase):
         finally:
             dns.asyncquery.tls = original
 
-        self.assertEqual(answer.rcode, dns.rcode.NOERROR)
+        self.assertEqual(answer.response.rcode(), dns.rcode.NOERROR)
         self.assertEqual(captured["kwargs"]["where"], "1.1.1.1")
         self.assertEqual(captured["kwargs"]["server_hostname"], "dns.example")
 
@@ -103,7 +103,7 @@ class TestMultiResolversAndTricks(unittest.IsolatedAsyncioTestCase):
         finally:
             dns.asyncquery.https = original
 
-        self.assertEqual(answer.rcode, dns.rcode.NOERROR)
+        self.assertEqual(answer.response.rcode(), dns.rcode.NOERROR)
         self.assertEqual(captured["kwargs"]["where"], "https://dns.example")
         self.assertEqual(captured["kwargs"]["path"], "/dns-query")
         self.assertEqual(captured["kwargs"]["bootstrap_address"], "1.1.1.1")
@@ -128,7 +128,7 @@ class TestMultiResolversAndTricks(unittest.IsolatedAsyncioTestCase):
         finally:
             dns.asyncquery.quic = original
 
-        self.assertEqual(answer.rcode, dns.rcode.NOERROR)
+        self.assertEqual(answer.response.rcode(), dns.rcode.NOERROR)
         self.assertEqual(captured["kwargs"]["where"], "1.1.1.1")
         self.assertEqual(captured["kwargs"]["server_hostname"], "dns.example")
 

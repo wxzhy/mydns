@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import dns.rcode
+import dns.resolver
 
+from core.answer import make_answer
 from core.context import QueryContext
 from core.hooks import RequestHook, ResolverHook, ResponseHook
-from core.models import Answer
 from logger import get_logger
 from resolver.resolver import Resolver
 from upstream.resolver_manager import ResolverManager
@@ -36,7 +37,7 @@ class Pipeline:
         )
         self.upstream_timeout_s = upstream_timeout_s
 
-    async def process(self, ctx: QueryContext) -> Answer:
+    async def process(self, ctx: QueryContext) -> dns.resolver.Answer:
         """执行完整流水线并返回最终响应。"""
         logger.debug(
             "处理请求 qname=%s qtype=%s client=%s tags=%s",
@@ -58,8 +59,8 @@ class Pipeline:
             "响应完成 qname=%s qtype=%s rcode=%s rrset_count=%s candidate_count=%s",
             ctx.query.qname.to_text(),
             ctx.query.qtype,
-            ctx.final_answer.rcode,
-            len(ctx.final_answer.rrsets),
+            ctx.final_answer.response.rcode(),
+            len(ctx.final_answer.response.answer),
             len(ctx.candidates),
         )
         return ctx.final_answer
@@ -77,7 +78,7 @@ class Pipeline:
         for hook in self.response_hooks:
             await hook.on_response(ctx)
 
-    def _fallback_answer(self, ctx: QueryContext) -> Answer:
+    def _fallback_answer(self, ctx: QueryContext) -> dns.resolver.Answer:
         logger.debug(
             "响应阶段未生成最终答案，返回SERVFAIL qname=%s qtype=%s candidates=%s",
             ctx.query.qname.to_text(),
@@ -86,10 +87,12 @@ class Pipeline:
                 {
                     "resolver": item.resolver_name,
                     "elapsed_ms": item.elapsed_ms,
-                    "rcode": item.answer.rcode if item.answer else None,
+                    "rcode": item.answer.response.rcode()
+                    if item.answer is not None
+                    else None,
                     "error": repr(item.error) if item.error else None,
                 }
                 for item in ctx.candidates
             ],
         )
-        return Answer(rcode=dns.rcode.SERVFAIL)
+        return make_answer(ctx.query, rcode=dns.rcode.SERVFAIL)

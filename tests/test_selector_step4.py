@@ -6,11 +6,13 @@ import unittest
 
 import dns.name
 import dns.rcode
+import dns.resolver
 import dns.rdatatype
 import dns.rrset
 
+from core.answer import make_answer
 from core.context import QueryContext
-from core.models import Answer, Query, ResolverResult
+from core.models import Query, ResolverResult
 from upstream.selector import select_best_answer
 
 
@@ -22,7 +24,7 @@ def _make_query(qtype: dns.rdatatype.RdataType) -> Query:
     )
 
 
-def _answer_with_a(ip: str) -> Answer:
+def _answer_with_a(ip: str) -> dns.resolver.Answer:
     cname_1 = dns.rrset.from_text(
         "www.example.com.",
         60,
@@ -38,10 +40,14 @@ def _answer_with_a(ip: str) -> Answer:
         "edge.example.com.",
     )
     a_rr = dns.rrset.from_text("edge.example.com.", 60, "IN", "A", ip)
-    return Answer(rcode=dns.rcode.NOERROR, rrsets=[cname_1, cname_2, a_rr])
+    return make_answer(
+        _make_query(dns.rdatatype.A),
+        rcode=dns.rcode.NOERROR,
+        rrsets=[cname_1, cname_2, a_rr],
+    )
 
 
-def _answer_with_aaaa(ipv6: str) -> Answer:
+def _answer_with_aaaa(ipv6: str) -> dns.resolver.Answer:
     cname = dns.rrset.from_text(
         "www.example.com.",
         60,
@@ -50,7 +56,11 @@ def _answer_with_aaaa(ipv6: str) -> Answer:
         "edge.example.com.",
     )
     aaaa_rr = dns.rrset.from_text("edge.example.com.", 60, "IN", "AAAA", ipv6)
-    return Answer(rcode=dns.rcode.NOERROR, rrsets=[cname, aaaa_rr])
+    return make_answer(
+        _make_query(dns.rdatatype.AAAA),
+        rcode=dns.rcode.NOERROR,
+        rrsets=[cname, aaaa_rr],
+    )
 
 
 class TestSelectorStep4(unittest.TestCase):
@@ -63,13 +73,13 @@ class TestSelectorStep4(unittest.TestCase):
         ]
 
         answer = select_best_answer(ctx)
-        self.assertEqual(answer.rcode, dns.rcode.NOERROR)
+        self.assertEqual(answer.response.rcode(), dns.rcode.NOERROR)
         self.assertEqual(
-            [x.rdtype for x in answer.rrsets],
+            [x.rdtype for x in answer.response.answer],
             [dns.rdatatype.CNAME, dns.rdatatype.CNAME, dns.rdatatype.A],
         )
 
-        a_rrset = answer.rrsets[-1]
+        a_rrset = answer.response.answer[-1]
         ips = {rdata.to_text() for rdata in a_rrset}
         self.assertEqual(ips, {"2.2.2.2"})
         self.assertEqual(len(a_rrset), 1)
@@ -83,20 +93,22 @@ class TestSelectorStep4(unittest.TestCase):
         ]
 
         answer = select_best_answer(ctx)
-        aaaa_rrset = [x for x in answer.rrsets if x.rdtype == dns.rdatatype.AAAA][0]
+        aaaa_rrset = [x for x in answer.response.answer if x.rdtype == dns.rdatatype.AAAA][0]
         ips = {rdata.to_text() for rdata in aaaa_rrset}
         self.assertEqual(ips, {"2001:db8::2"})
 
     def test_non_a_type_fastest_response_passthrough(self) -> None:
-        txt_slow = Answer(
+        txt_slow = make_answer(
+            _make_query(dns.rdatatype.TXT),
             rcode=dns.rcode.NOERROR,
             rrsets=[dns.rrset.from_text("example.com.", 60, "IN", "TXT", '"slow"')],
         )
-        txt_fast = Answer(
+        txt_fast = make_answer(
+            _make_query(dns.rdatatype.TXT),
             rcode=dns.rcode.NOERROR,
             rrsets=[dns.rrset.from_text("example.com.", 60, "IN", "TXT", '"fast"')],
         )
-        nxdomain = Answer(rcode=dns.rcode.NXDOMAIN, rrsets=[])
+        nxdomain = make_answer(_make_query(dns.rdatatype.TXT), rcode=dns.rcode.NXDOMAIN)
 
         ctx = QueryContext(query=_make_query(dns.rdatatype.TXT))
         ctx.candidates = [
@@ -106,7 +118,7 @@ class TestSelectorStep4(unittest.TestCase):
         ]
 
         answer = select_best_answer(ctx)
-        self.assertEqual(answer.rrsets[0][0].to_text(), '"fast"')
+        self.assertEqual(answer.response.answer[0][0].to_text(), '"fast"')
 
 
 if __name__ == "__main__":

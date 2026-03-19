@@ -9,9 +9,10 @@ import dns.exception
 import dns.flags
 import dns.message
 import dns.rcode
+import dns.resolver
 
 from core.context import QueryContext
-from core.models import Answer, Query
+from core.models import Query
 
 
 def parse_query_context(
@@ -36,12 +37,12 @@ def parse_query_context(
     return ctx
 
 
-def build_response_wire(ctx: QueryContext, answer: Answer) -> bytes:
+def build_response_wire(ctx: QueryContext, answer: dns.resolver.Answer) -> bytes:
     """将抽象响应转换为 DNS wire。"""
     request: dns.message.Message = _require_state_value(ctx.state, "request_message")
     response = dns.message.make_response(request)
-    response.set_rcode(answer.rcode)
-    response.answer.extend(answer.rrsets)
+    response.set_rcode(answer.response.rcode())
+    response.answer.extend(answer.response.answer)
     return response.to_wire()
 
 

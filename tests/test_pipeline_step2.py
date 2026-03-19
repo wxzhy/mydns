@@ -6,11 +6,13 @@ import unittest
 
 import dns.name
 import dns.rcode
+import dns.resolver
 import dns.rdatatype
 
+from core.answer import make_answer
 from core.context import QueryContext
 from core.hooks import RequestHook, ResponseHook
-from core.models import Answer, Query
+from core.models import Query
 from core.pipeline import Pipeline
 from plugins.speedcheck import RewriteAnswerByRTTHook
 from resolver.resolver import Resolver
@@ -24,7 +26,7 @@ class _TrackRequestHook(RequestHook):
     async def on_request(self, ctx: QueryContext) -> None:
         self.events.append("request")
         if self.stop:
-            ctx.final_answer = Answer(rcode=dns.rcode.NXDOMAIN)
+            ctx.final_answer = make_answer(ctx.query, rcode=dns.rcode.NXDOMAIN)
             ctx.stop = True
 
 
@@ -38,13 +40,13 @@ class _TrackResponseHook(ResponseHook):
 
 
 class _TrackResolver(Resolver):
-    def __init__(self, events: list[str], answer: Answer) -> None:
+    def __init__(self, events: list[str], answer: dns.resolver.Answer) -> None:
         self.name = "track"
         self.tags = {"default"}
         self.events = events
         self.answer = answer
 
-    async def resolve(self, query: Query, timeout_s: float) -> Answer:
+    async def resolve(self, query: Query, timeout_s: float) -> dns.resolver.Answer:
         _ = query, timeout_s
         self.events.append("upstream")
         return self.answer
@@ -56,7 +58,7 @@ class _FailIfCalledResolver(Resolver):
 
     async def resolve(
         self, query: Query, timeout_s: float
-    ) -> Answer:  # pragma: no cover
+    ) -> dns.resolver.Answer:  # pragma: no cover
         _ = query, timeout_s
         raise AssertionError("短路后不应再访问上游")
 
@@ -73,13 +75,13 @@ class TestPipelineStep2(unittest.IsolatedAsyncioTestCase):
     async def test_pipeline_order(self) -> None:
         events: list[str] = []
         pipeline = Pipeline(
-            resolvers=[_TrackResolver(events, Answer(rcode=dns.rcode.NOERROR))],
+            resolvers=[_TrackResolver(events, make_answer(self.ctx.query, rcode=dns.rcode.NOERROR))],
             request_hooks=[_TrackRequestHook(events)],
             response_hooks=[RewriteAnswerByRTTHook(), _TrackResponseHook(events)],
         )
 
         answer = await pipeline.process(self.ctx)
-        self.assertEqual(answer.rcode, dns.rcode.NOERROR)
+        self.assertEqual(answer.response.rcode(), dns.rcode.NOERROR)
         self.assertEqual(events, ["request", "upstream", "response"])
 
     async def test_request_short_circuit(self) -> None:
@@ -91,7 +93,7 @@ class TestPipelineStep2(unittest.IsolatedAsyncioTestCase):
         )
 
         answer = await pipeline.process(self.ctx)
-        self.assertEqual(answer.rcode, dns.rcode.NXDOMAIN)
+        self.assertEqual(answer.response.rcode(), dns.rcode.NXDOMAIN)
         self.assertEqual(events, ["request", "response"])
 
     async def test_empty_candidates_return_servfail(self) -> None:
@@ -103,7 +105,7 @@ class TestPipelineStep2(unittest.IsolatedAsyncioTestCase):
         )
 
         answer = await pipeline.process(self.ctx)
-        self.assertEqual(answer.rcode, dns.rcode.SERVFAIL)
+        self.assertEqual(answer.response.rcode(), dns.rcode.SERVFAIL)
         self.assertEqual(events, ["request", "response"])
 
 

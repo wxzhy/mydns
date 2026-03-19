@@ -5,8 +5,9 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 
 import dns.message
+import dns.resolver
 
-from core.models import Answer, Query
+from core.models import Query
 
 
 class Resolver(ABC):
@@ -16,7 +17,7 @@ class Resolver(ABC):
     tags: set[str]
 
     @abstractmethod
-    async def resolve(self, query: Query, timeout_s: float) -> Answer:
+    async def resolve(self, query: Query, timeout_s: float) -> dns.resolver.Answer:
         """对查询执行解析。"""
 
 

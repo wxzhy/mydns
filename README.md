@@ -8,7 +8,7 @@
 ## 核心抽象
 
 - `Query = (client_addr, qname, qtype, ecs)`
-- `Answer = (rcode, list[rrset])`
+- `Answer = dns.resolver.Answer（通过 answer.response.rcode()/answer.response.answer 访问响应）`
 - `QueryContext = (query, candidates, final_answer, tags, state, stop)`
 
 为简化首版设计，忽略 `qclass`、`authority` 等非关键字段。

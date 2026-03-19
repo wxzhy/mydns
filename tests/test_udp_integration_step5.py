@@ -8,10 +8,12 @@ import dns.asyncquery
 import dns.message
 import dns.name
 import dns.rcode
+import dns.resolver
 import dns.rdatatype
 import dns.rrset
 
-from core.models import Answer, Query
+from core.answer import make_answer
+from core.models import Query
 from core.pipeline import Pipeline
 from plugins.speedcheck import RewriteAnswerByRTTHook
 from resolver.resolver import Resolver
@@ -22,7 +24,7 @@ class _StaticResolver(Resolver):
     name = "static"
     tags = {"default"}
 
-    async def resolve(self, query: Query, timeout_s: float) -> Answer:
+    async def resolve(self, query: Query, timeout_s: float) -> dns.resolver.Answer:
         _ = timeout_s
         if query.qtype == dns.rdatatype.A:
             cname = dns.rrset.from_text(
@@ -33,8 +35,12 @@ class _StaticResolver(Resolver):
                 "edge.example.com.",
             )
             a_rr = dns.rrset.from_text("edge.example.com.", 30, "IN", "A", "1.1.1.1")
-            return Answer(rcode=dns.rcode.NOERROR, rrsets=[cname, a_rr])
-        return Answer(rcode=dns.rcode.NOERROR, rrsets=[])
+            return make_answer(
+                query,
+                rcode=dns.rcode.NOERROR,
+                rrsets=[cname, a_rr],
+            )
+        return make_answer(query, rcode=dns.rcode.NOERROR)
 
 
 class TestUDPIntegrationStep5(unittest.IsolatedAsyncioTestCase):

@@ -8,11 +8,13 @@ import unittest
 
 import dns.name
 import dns.rcode
+import dns.resolver
 import dns.rdatatype
 import dns.rrset
 
+from core.answer import make_answer
 from core.context import QueryContext
-from core.models import Answer, Query, ResolverResult
+from core.models import Query, ResolverResult
 from plugins.speedcheck import RewriteAnswerByRTTHook, SpeedCheckResolverHook
 
 
@@ -26,9 +28,9 @@ def _make_ctx(qtype: dns.rdatatype.RdataType) -> QueryContext:
     )
 
 
-def _make_a_answer(*ips: str) -> Answer:
+def _make_a_answer(*ips: str) -> dns.resolver.Answer:
     rr = dns.rrset.from_text("www.example.com.", 30, "IN", "A", *ips)
-    return Answer(rcode=dns.rcode.NOERROR, rrsets=[rr])
+    return make_answer(_make_ctx(dns.rdatatype.A).query, rcode=dns.rcode.NOERROR, rrsets=[rr])
 
 
 class TestSpeedcheckHooks(unittest.IsolatedAsyncioTestCase):
@@ -62,7 +64,11 @@ class TestSpeedcheckHooks(unittest.IsolatedAsyncioTestCase):
             "edge.example.com.",
         )
         a_rr = dns.rrset.from_text("edge.example.com.", 30, "IN", "A", "9.9.9.9", "8.8.8.8")
-        ctx.final_answer = Answer(rcode=dns.rcode.NOERROR, rrsets=[cname, a_rr])
+        ctx.final_answer = make_answer(
+            ctx.query,
+            rcode=dns.rcode.NOERROR,
+            rrsets=[cname, a_rr],
+        )
         ctx.ip_list.results = {
             "1.1.1.1": 5.0,
             "8.8.8.8": 20.0,
@@ -71,7 +77,7 @@ class TestSpeedcheckHooks(unittest.IsolatedAsyncioTestCase):
 
         await hook.on_response(ctx)
 
-        rewritten = [x for x in ctx.final_answer.rrsets if x.rdtype == dns.rdatatype.A][0]
+        rewritten = [x for x in ctx.final_answer.response.answer if x.rdtype == dns.rdatatype.A][0]
         ips = [rdata.to_text() for rdata in rewritten]
         self.assertEqual(ips, ["1.1.1.1", "8.8.8.8"])
         self.assertEqual(rewritten.ttl, 900)
@@ -80,11 +86,15 @@ class TestSpeedcheckHooks(unittest.IsolatedAsyncioTestCase):
         hook = RewriteAnswerByRTTHook(max_return_ips=2)
         ctx = _make_ctx(dns.rdatatype.TXT)
         txt = dns.rrset.from_text("www.example.com.", 30, "IN", "TXT", "\"hello\"")
-        ctx.final_answer = Answer(rcode=dns.rcode.NOERROR, rrsets=[txt])
+        ctx.final_answer = make_answer(
+            ctx.query,
+            rcode=dns.rcode.NOERROR,
+            rrsets=[txt],
+        )
         ctx.ip_list.results = {"1.1.1.1": 5.0}
 
         await hook.on_response(ctx)
-        self.assertEqual(ctx.final_answer.rrsets[0][0].to_text(), "\"hello\"")
+        self.assertEqual(ctx.final_answer.response.answer[0][0].to_text(), "\"hello\"")
 
     async def test_response_hook_build_base_answer_when_final_missing(self) -> None:
         hook = RewriteAnswerByRTTHook(max_return_ips=2)
@@ -94,12 +104,20 @@ class TestSpeedcheckHooks(unittest.IsolatedAsyncioTestCase):
         ctx.candidates = [
             ResolverResult(
                 resolver_name="slow",
-                answer=Answer(rcode=dns.rcode.NOERROR, rrsets=[txt_slow]),
+                answer=make_answer(
+                    ctx.query,
+                    rcode=dns.rcode.NOERROR,
+                    rrsets=[txt_slow],
+                ),
                 elapsed_ms=50.0,
             ),
             ResolverResult(
                 resolver_name="fast",
-                answer=Answer(rcode=dns.rcode.NOERROR, rrsets=[txt_fast]),
+                answer=make_answer(
+                    ctx.query,
+                    rcode=dns.rcode.NOERROR,
+                    rrsets=[txt_fast],
+                ),
                 elapsed_ms=10.0,
             ),
         ]
@@ -107,8 +125,8 @@ class TestSpeedcheckHooks(unittest.IsolatedAsyncioTestCase):
         await hook.on_response(ctx)
 
         self.assertIsNotNone(ctx.final_answer)
-        self.assertEqual(ctx.final_answer.rcode, dns.rcode.NOERROR)
-        self.assertEqual(ctx.final_answer.rrsets[0][0].to_text(), "\"fast\"")
+        self.assertEqual(ctx.final_answer.response.rcode(), dns.rcode.NOERROR)
+        self.assertEqual(ctx.final_answer.response.answer[0][0].to_text(), "\"fast\"")
 
     async def test_response_hook_backfill_when_target_rrset_missing(self) -> None:
         hook = RewriteAnswerByRTTHook(max_return_ips=2, ttl_s=900)
@@ -120,7 +138,11 @@ class TestSpeedcheckHooks(unittest.IsolatedAsyncioTestCase):
             "CNAME",
             "edge.example.com.",
         )
-        ctx.final_answer = Answer(rcode=dns.rcode.NOERROR, rrsets=[cname])
+        ctx.final_answer = make_answer(
+            ctx.query,
+            rcode=dns.rcode.NOERROR,
+            rrsets=[cname],
+        )
         ctx.ip_list.results = {
             "1.1.1.1": 5.0,
             "2.2.2.2": 10.0,
@@ -128,7 +150,7 @@ class TestSpeedcheckHooks(unittest.IsolatedAsyncioTestCase):
 
         await hook.on_response(ctx)
 
-        a_rrset = [x for x in ctx.final_answer.rrsets if x.rdtype == dns.rdatatype.A][0]
+        a_rrset = [x for x in ctx.final_answer.response.answer if x.rdtype == dns.rdatatype.A][0]
         self.assertEqual(a_rrset.name.to_text(), "edge.example.com.")
         self.assertEqual([rdata.to_text() for rdata in a_rrset], ["1.1.1.1", "2.2.2.2"])
         self.assertEqual(a_rrset.ttl, 900)

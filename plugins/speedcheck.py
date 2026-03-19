@@ -10,11 +10,12 @@ import dns.name
 import dns.rdata
 import dns.rdataclass
 import dns.rdatatype
+import dns.resolver
 import dns.rrset
 
 from core.context import QueryContext
 from core.hooks import ResolverHook, ResponseHook
-from core.models import Answer, ResolverResult
+from core.models import ResolverResult
 from logger import get_logger
 from plugins.utils.speedcheck import probe_ips
 from upstream.selector import select_best_answer
@@ -57,7 +58,7 @@ class SpeedCheckResolverHook(ResolverHook):
             )
             return result
 
-        ips = _extract_ips(result.answer.rrsets, qtype=ctx.query.qtype)
+        ips = _extract_ips(result.answer.response.answer, qtype=ctx.query.qtype)
         if not ips:
             logger.debug(
                 "测速跳过 resolver=%s qname=%s qtype=%s reason=no_ip_rrset",
@@ -148,12 +149,12 @@ class RewriteAnswerByRTTHook(ResponseHook):
         if answer is None:
             logger.debug("响应改写跳过 qname=%s reason=no_final_answer", ctx.query.qname.to_text())
             return
-        if answer.rcode != dns.rcode.NOERROR:
+        if answer.response.rcode() != dns.rcode.NOERROR:
             logger.debug(
                 "响应改写跳过 qname=%s qtype=%s reason=rcode_not_noerror rcode=%s",
                 ctx.query.qname.to_text(),
                 ctx.query.qtype,
-                answer.rcode,
+                answer.response.rcode(),
             )
             return
         if ctx.query.qtype not in {dns.rdatatype.A, dns.rdatatype.AAAA}:
@@ -177,7 +178,7 @@ class RewriteAnswerByRTTHook(ResponseHook):
         if not ranked_ips:
             return
 
-        target_rrsets = [x for x in answer.rrsets if x.rdtype == ctx.query.qtype]
+        target_rrsets = [x for x in answer.response.answer if x.rdtype == ctx.query.qtype]
         if target_rrsets:
             rrset = target_rrsets[0]
             original_count = max(1, len(rrset))
@@ -197,7 +198,9 @@ class RewriteAnswerByRTTHook(ResponseHook):
         if not selected_ips:
             return
 
-        cname_count = sum(1 for x in answer.rrsets if x.rdtype == dns.rdatatype.CNAME)
+        cname_count = sum(
+            1 for x in answer.response.answer if x.rdtype == dns.rdatatype.CNAME
+        )
         rewritten = _build_ip_rrset(
             owner_name=owner_name,
             rdclass=rdclass,
@@ -209,16 +212,16 @@ class RewriteAnswerByRTTHook(ResponseHook):
         if target_rrsets:
             new_rrsets: list[dns.rrset.RRset] = []
             replaced = False
-            for item in answer.rrsets:
+            for item in answer.response.answer:
                 if item.rdtype == ctx.query.qtype:
                     if not replaced:
                         new_rrsets.append(rewritten)
                         replaced = True
                     continue
                 new_rrsets.append(item)
-            answer.rrsets = new_rrsets
+            answer.response.answer[:] = new_rrsets
         else:
-            answer.rrsets.append(rewritten)
+            answer.response.answer.append(rewritten)
 
         logger.debug(
             "响应IP改写 qname=%s qtype=%s cname_count=%s old_ips=%s new_ips=%s ttl=%s backfilled=%s rtt=%s",
@@ -247,9 +250,9 @@ def _extract_ips(rrsets: list[dns.rrset.RRset], qtype: dns.rdatatype.RdataType) 
 
 def _resolve_owner_name_and_class(
     ctx: QueryContext,
-    answer: Answer,
+    answer: dns.resolver.Answer,
 ) -> tuple[dns.name.Name, dns.rdataclass.RdataClass]:
-    rrsets = answer.rrsets
+    rrsets = answer.response.answer
     cname_rrsets = [item for item in rrsets if item.rdtype == dns.rdatatype.CNAME]
     if cname_rrsets:
         last = cname_rrsets[-1]

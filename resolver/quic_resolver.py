@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import dns.asyncquery
+import dns.resolver
 
-from core.models import Answer, Query
+from core.answer import answer_from_response
+from core.models import Query
 from resolver.resolver import Resolver, build_request_message
 
 
@@ -34,7 +36,7 @@ class QuicUpstreamResolver(Resolver):
         self.source_port = source_port
         self.tags = tags or {"default"}
 
-    async def resolve(self, query: Query, timeout_s: float) -> Answer:
+    async def resolve(self, query: Query, timeout_s: float) -> dns.resolver.Answer:
         request = build_request_message(query, use_edns=True)
         response = await dns.asyncquery.quic(
             request,
@@ -47,7 +49,9 @@ class QuicUpstreamResolver(Resolver):
             hostname=self.hostname,
             server_hostname=self.server_hostname,
         )
-        return Answer(
-            rcode=response.rcode(),
-            rrsets=list(response.answer),
+        return answer_from_response(
+            query,
+            response,
+            nameserver=self.address,
+            port=self.port,
         )
