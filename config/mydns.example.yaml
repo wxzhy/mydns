@@ -1,4 +1,4 @@
-# mydns 示例配置（当前版本仅作说明用途，尚未接入自动加载）
+# mydns 示例配置（可通过 main.py --config 加载）
 
 server:
   host: 127.0.0.1
@@ -13,6 +13,23 @@ resolvers:
     address: 1.1.1.1
     port: 53
     tags: [default]
+  - name: dns-google-tls
+    type: tls
+    address: 8.8.8.8
+    port: 853
+    server_hostname: dns.google
+    tags: [default]
+  - name: dns-cloudflare-doh
+    type: https
+    address: cloudflare-dns.com
+    path: /dns-query
+    bootstrap_address: 1.1.1.1
+    tags: [default]
+  - name: dns-google-doq
+    type: quic
+    address: 8.8.8.8
+    server_hostname: dns.google
+    tags: [default]
   - name: google
     type: udp
     address: 8.8.8.8
@@ -24,5 +41,12 @@ hooks:
     - plugins.builtin.NoopRequestHook
   resolver:
     - plugins.builtin.NoopResolverHook
+    - class: plugins.speedcheck.SpeedCheckResolverHook
+      kwargs:
+        timeout_s: 0.8
   response:
     - plugins.builtin.NoopResponseHook
+    - class: plugins.speedcheck.RewriteAnswerByRTTHook
+      kwargs:
+        max_return_ips: 2
+        ttl_s: 900
