@@ -19,16 +19,15 @@ async def probe_ips(
 ) -> dict[str, float | None]:
     """并发测速多个 IP，返回每个 IP 的最佳 RTT（毫秒）。"""
     ip_list = list(dict.fromkeys(ips))
-    tasks = {
-        ip: asyncio.create_task(probe_one_ip(ip, timeout_s=timeout_s)) for ip in ip_list
-    }
+    probes = [probe_one_ip(ip, timeout_s=timeout_s) for ip in ip_list]
+    raw_results = await asyncio.gather(*probes, return_exceptions=True)
     results: dict[str, float | None] = {}
-    for ip, task in tasks.items():
-        try:
-            results[ip] = await task
-        except Exception:
-            logger.debug("测速异常 ip=%s", ip, exc_info=True)
+    for ip, raw in zip(ip_list, raw_results, strict=True):
+        if isinstance(raw, Exception):
+            logger.debug("测速异常 ip=%s err=%r", ip, raw)
             results[ip] = None
+        else:
+            results[ip] = raw
     return results
 
 
@@ -41,19 +40,12 @@ async def probe_one_ip(ip: str, timeout_s: float) -> float | None:
     ]
 
     try:
-        pending = set(tasks)
-        while pending:
-            done, pending = await asyncio.wait(
-                pending,
-                timeout=timeout_s,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            if not done:
-                break
-            for task in done:
-                rtt = task.result()
-                if rtt is not None:
-                    return rtt
+        for completed in asyncio.as_completed(tasks, timeout=timeout_s):
+            rtt = await completed
+            if rtt is not None:
+                return rtt
+        return None
+    except TimeoutError:
         return None
     finally:
         for task in tasks:

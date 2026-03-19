@@ -54,61 +54,47 @@ class ResolverManager:
                 timeout_s,
             )
 
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout_s
-        pending = {
+        tasks = [
             asyncio.create_task(self._query_one(resolver, ctx, timeout_s))
             for resolver in matched
-        }
-        should_stop = False
+        ]
 
-        while pending:
-            remaining = deadline - loop.time()
-            if remaining <= 0:
-                logger.debug(
-                    "上游等待超时 qname=%s qtype=%s pending=%s",
-                    ctx.query.qname.to_text(),
-                    ctx.query.qtype,
-                    len(pending),
-                )
-                break
-
-            done, pending = await asyncio.wait(
-                pending,
-                timeout=remaining,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            if not done:
-                break
-
-            for task in done:
-                result = task.result()
-                processed = await self._run_resolver_hooks(ctx, result)
-                if processed is not None:
-                    ctx.candidates.append(processed)
-                    logger.debug(
-                        "上游结果保留 resolver=%s elapsed_ms=%.2f rcode=%s error=%s",
-                        processed.resolver_name,
-                        processed.elapsed_ms or -1,
-                        processed.answer.rcode if processed.answer else None,
-                        repr(processed.error) if processed.error else None,
-                    )
-                    if not wait_all and _is_normal_result(processed):
-                        ctx.final_answer = processed.answer
-                        should_stop = True
+        try:
+            async with asyncio.timeout(timeout_s):
+                for completed in asyncio.as_completed(tasks):
+                    result = await completed
+                    processed = await self._run_resolver_hooks(ctx, result)
+                    if processed is not None:
+                        ctx.candidates.append(processed)
                         logger.debug(
-                            "非A/AAAA已获得首个正常结果 resolver=%s，写入final_answer并提前结束等待",
+                            "上游结果保留 resolver=%s elapsed_ms=%.2f rcode=%s error=%s",
                             processed.resolver_name,
+                            processed.elapsed_ms or -1,
+                            processed.answer.rcode if processed.answer else None,
+                            repr(processed.error) if processed.error else None,
                         )
-                        break
-                else:
-                    logger.debug(
-                        "上游结果被hook丢弃 resolver=%s",
-                        result.resolver_name,
-                    )
-            if should_stop:
-                break
+                        if not wait_all and _is_normal_result(processed):
+                            ctx.final_answer = processed.answer
+                            logger.debug(
+                                "非A/AAAA已获得首个正常结果 resolver=%s，写入final_answer并提前结束等待",
+                                processed.resolver_name,
+                            )
+                            break
+                    else:
+                        logger.debug(
+                            "上游结果被hook丢弃 resolver=%s",
+                            result.resolver_name,
+                        )
+        except TimeoutError:
+            pending_count = sum(1 for task in tasks if not task.done())
+            logger.debug(
+                "上游等待超时 qname=%s qtype=%s pending=%s",
+                ctx.query.qname.to_text(),
+                ctx.query.qtype,
+                pending_count,
+            )
 
+        pending = [task for task in tasks if not task.done()]
         for task in pending:
             task.cancel()
         if pending:
