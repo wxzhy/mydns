@@ -6,6 +6,7 @@ import asyncio
 import time
 import unittest
 
+import dns.message
 import dns.name
 import dns.rcode
 import dns.resolver
@@ -77,7 +78,9 @@ class TestSpeedcheckHooks(unittest.IsolatedAsyncioTestCase):
 
         await hook.on_response(ctx)
 
-        rewritten = [x for x in ctx.final_answer.response.answer if x.rdtype == dns.rdatatype.A][0]
+        final_response = make_answer(ctx.query, ctx.final_answer)
+        self.assertIsInstance(final_response, dns.message.Message)
+        rewritten = [x for x in final_response.answer if x.rdtype == dns.rdatatype.A][0]
         ips = [rdata.to_text() for rdata in rewritten]
         self.assertEqual(ips, ["1.1.1.1", "8.8.8.8"])
         self.assertEqual(rewritten.ttl, 900)
@@ -150,7 +153,9 @@ class TestSpeedcheckHooks(unittest.IsolatedAsyncioTestCase):
 
         await hook.on_response(ctx)
 
-        a_rrset = [x for x in ctx.final_answer.response.answer if x.rdtype == dns.rdatatype.A][0]
+        final_response = make_answer(ctx.query, ctx.final_answer)
+        self.assertIsInstance(final_response, dns.message.Message)
+        a_rrset = [x for x in final_response.answer if x.rdtype == dns.rdatatype.A][0]
         self.assertEqual(a_rrset.name.to_text(), "edge.example.com.")
         self.assertEqual([rdata.to_text() for rdata in a_rrset], ["1.1.1.1", "2.2.2.2"])
         self.assertEqual(a_rrset.ttl, 900)

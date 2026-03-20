@@ -8,6 +8,7 @@ import dns.edns
 import dns.name
 import dns.rdatatype
 import dns.resolver
+import dns.message
 
 
 @dataclass(slots=True)
@@ -19,6 +20,7 @@ class Query:
     qtype: dns.rdatatype.RdataType
     txid: int = 0
     ecs: dns.edns.ECSOption | None = None
+    message: dns.message.Message | None = None
 
 
 @dataclass(slots=True)

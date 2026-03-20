@@ -42,6 +42,7 @@ class SpeedCheckResolverHook(ResolverHook):
         ctx: QueryContext,
         result: ResolverResult,
     ) -> ResolverResult | None:
+        qname_text = ctx.query.qname.to_text()
         if result.answer is None or result.error is not None:
             logger.debug(
                 "测速跳过 resolver=%s reason=answer_or_error answer=%s error=%s",
@@ -58,12 +59,13 @@ class SpeedCheckResolverHook(ResolverHook):
             )
             return result
 
-        ips = _extract_ips(result.answer.response.answer, qtype=ctx.query.qtype)
+        # 统一从 Answer.rrset 读取 IP 候选，避免扫描 response.answer 的冗余逻辑。
+        ips = _extract_ips(result.answer, qtype=ctx.query.qtype)
         if not ips:
             logger.debug(
                 "测速跳过 resolver=%s qname=%s qtype=%s reason=no_ip_rrset",
                 result.resolver_name,
-                ctx.query.qname.to_text(),
+                qname_text,
                 ctx.query.qtype,
             )
             return result
@@ -75,7 +77,7 @@ class SpeedCheckResolverHook(ResolverHook):
         logger.debug(
             "测速准备 resolver=%s qname=%s qtype=%s ips=%s pending=%s cached=%s",
             result.resolver_name,
-            ctx.query.qname.to_text(),
+            qname_text,
             ctx.query.qtype,
             ips,
             pending,
@@ -92,7 +94,7 @@ class SpeedCheckResolverHook(ResolverHook):
                 logger.debug(
                     "测速超时 resolver=%s qname=%s qtype=%s pending=%s timeout=%.3fs",
                     result.resolver_name,
-                    ctx.query.qname.to_text(),
+                    qname_text,
                     ctx.query.qtype,
                     pending,
                     self.timeout_s,
@@ -102,7 +104,7 @@ class SpeedCheckResolverHook(ResolverHook):
                 logger.debug(
                     "测速异常 resolver=%s qname=%s qtype=%s pending=%s err=%r",
                     result.resolver_name,
-                    ctx.query.qname.to_text(),
+                    qname_text,
                     ctx.query.qtype,
                     pending,
                     exc,
@@ -114,7 +116,7 @@ class SpeedCheckResolverHook(ResolverHook):
         logger.debug(
             "测速完成 resolver=%s qname=%s qtype=%s ips=%s pending=%s rtt=%s cache=%s",
             result.resolver_name,
-            ctx.query.qname.to_text(),
+            qname_text,
             ctx.query.qtype,
             ips,
             pending,
@@ -136,10 +138,11 @@ class RewriteAnswerByRTTHook(ResponseHook):
         self.ttl_s = max(600, min(900, ttl_s))
 
     async def on_response(self, ctx: QueryContext) -> None:
+        qname_text = ctx.query.qname.to_text()
         if ctx.final_answer is None:
             logger.debug(
                 "响应基础构造 qname=%s qtype=%s candidates=%s",
-                ctx.query.qname.to_text(),
+                qname_text,
                 ctx.query.qtype,
                 len(ctx.candidates),
             )
@@ -147,12 +150,15 @@ class RewriteAnswerByRTTHook(ResponseHook):
 
         answer = ctx.final_answer
         if answer is None:
-            logger.debug("响应改写跳过 qname=%s reason=no_final_answer", ctx.query.qname.to_text())
+            logger.debug(
+                "响应改写跳过 qname=%s reason=no_final_answer",
+                qname_text,
+            )
             return
         if answer.response.rcode() != dns.rcode.NOERROR:
             logger.debug(
                 "响应改写跳过 qname=%s qtype=%s reason=rcode_not_noerror rcode=%s",
-                ctx.query.qname.to_text(),
+                qname_text,
                 ctx.query.qtype,
                 answer.response.rcode(),
             )
@@ -160,16 +166,17 @@ class RewriteAnswerByRTTHook(ResponseHook):
         if ctx.query.qtype not in {dns.rdatatype.A, dns.rdatatype.AAAA}:
             logger.debug(
                 "响应改写跳过 qname=%s qtype=%s reason=unsupported_qtype",
-                ctx.query.qname.to_text(),
+                qname_text,
                 ctx.query.qtype,
             )
             return
 
+        # 仅使用已有测速结果（None 表示失败/超时）参与排序。
         ip_rtt = {ip: rtt for ip, rtt in ctx.ip_list.results.items() if rtt is not None}
         if not ip_rtt:
             logger.debug(
                 "响应改写跳过 qname=%s qtype=%s reason=no_rtt_data",
-                ctx.query.qname.to_text(),
+                qname_text,
                 ctx.query.qtype,
             )
             return
@@ -178,89 +185,55 @@ class RewriteAnswerByRTTHook(ResponseHook):
         if not ranked_ips:
             return
 
-        target_rrsets = [x for x in answer.response.answer if x.rdtype == ctx.query.qtype]
-        if target_rrsets:
-            rrset = target_rrsets[0]
-            original_count = max(1, len(rrset))
-            limit = min(self.max_return_ips, original_count, len(ranked_ips))
-            selected_ips = ranked_ips[:limit]
-            old_ips = [rdata.to_text() for rdata in rrset]
-            owner_name = rrset.name
-            rdclass = rrset.rdclass
-            backfilled = False
-        else:
-            limit = min(self.max_return_ips, len(ranked_ips))
-            selected_ips = ranked_ips[:limit]
-            old_ips = []
-            owner_name, rdclass = _resolve_owner_name_and_class(ctx, answer)
-            backfilled = True
-
+        chain = answer.chaining_result
+        owner_name = answer.chaining_result.canonical_name or answer.qname
+        limit = min(self.max_return_ips, len(ranked_ips))
+        selected_ips = ranked_ips[:limit]
         if not selected_ips:
             return
 
-        cname_count = sum(
-            1 for x in answer.response.answer if x.rdtype == dns.rdatatype.CNAME
-        )
+        # `chaining_result` 与 `rrset` 在 Answer 中是独立部分：
+        # 这里只替换 rrset，CNAME 链保持由 chaining_result 负责。
         rewritten = _build_ip_rrset(
             owner_name=owner_name,
-            rdclass=rdclass,
-            qtype=ctx.query.qtype,
+            rdclass=answer.rdclass,
+            qtype=answer.rdtype,
             ips=selected_ips,
             ttl_s=self.ttl_s,
         )
-
-        if target_rrsets:
-            new_rrsets: list[dns.rrset.RRset] = []
-            replaced = False
-            for item in answer.response.answer:
-                if item.rdtype == ctx.query.qtype:
-                    if not replaced:
-                        new_rrsets.append(rewritten)
-                        replaced = True
-                    continue
-                new_rrsets.append(item)
-            answer.response.answer[:] = new_rrsets
-        else:
-            answer.response.answer.append(rewritten)
+        answer.rrset = rewritten
+        cname_count = len(chain.cnames)
 
         logger.debug(
-            "响应IP改写 qname=%s qtype=%s cname_count=%s old_ips=%s new_ips=%s ttl=%s backfilled=%s rtt=%s",
-            ctx.query.qname.to_text(),
+            "响应IP改写 qname=%s qtype=%s cname_count=%s new_ips=%s ttl=%s rtt=%s",
+            qname_text,
             ctx.query.qtype,
             cname_count,
-            old_ips,
             selected_ips,
             rewritten.ttl,
-            backfilled,
             ip_rtt,
         )
 
 
-def _extract_ips(rrsets: list[dns.rrset.RRset], qtype: dns.rdatatype.RdataType) -> list[str]:
-    ips: list[str] = []
-    for rrset in rrsets:
-        if rrset.rdtype != qtype:
-            continue
-        for rdata in rrset:
-            text = rdata.to_text()
-            if text not in ips:
-                ips.append(text)
-    return ips
-
-
-def _resolve_owner_name_and_class(
-    ctx: QueryContext,
+def _extract_ips(
     answer: dns.resolver.Answer,
-) -> tuple[dns.name.Name, dns.rdataclass.RdataClass]:
-    rrsets = answer.response.answer
-    cname_rrsets = [item for item in rrsets if item.rdtype == dns.rdatatype.CNAME]
-    if cname_rrsets:
-        last = cname_rrsets[-1]
-        first_cname = next(iter(last), None)
-        if first_cname is not None and hasattr(first_cname, "target"):
-            return first_cname.target, last.rdclass
-        return last.name, last.rdclass
-    return ctx.query.qname, dns.rdataclass.IN
+    *,
+    qtype: dns.rdatatype.RdataType,
+) -> list[str]:
+    """从 Answer.rrset 提取 A/AAAA 地址，保持原顺序并去重。"""
+    rrset = answer.rrset
+    if rrset is None or rrset.rdtype != qtype:
+        return []
+
+    ips: list[str] = []
+    seen: set[str] = set()
+    for rdata in rrset:
+        ip_text = rdata.to_text()
+        if ip_text in seen:
+            continue
+        seen.add(ip_text)
+        ips.append(ip_text)
+    return ips
 
 
 def _build_ip_rrset(

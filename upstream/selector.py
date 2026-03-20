@@ -7,7 +7,7 @@ from math import inf
 import dns.rcode
 import dns.resolver
 
-from core.answer import make_answer
+from core.answer import make_resolver_answer
 from core.context import QueryContext
 from core.models import ResolverResult
 from logger import get_logger
@@ -25,7 +25,7 @@ def select_best_answer(ctx: QueryContext) -> dns.resolver.Answer:
             ctx.query.qname.to_text(),
             ctx.query.qtype,
         )
-        return make_answer(ctx.query, rcode=dns.rcode.SERVFAIL)
+        return make_resolver_answer(ctx.query, rcode=dns.rcode.SERVFAIL)
     selected = _select_fastest_normal(candidates)
     logger.debug(
         "基础结果选择完成 qname=%s qtype=%s selected_rcode=%s rrset_count=%s",

@@ -5,7 +5,7 @@ from __future__ import annotations
 import dns.rcode
 import dns.resolver
 
-from core.answer import make_answer
+from core.answer import make_resolver_answer
 from core.context import QueryContext
 from core.hooks import RequestHook, ResolverHook, ResponseHook
 from logger import get_logger
@@ -95,4 +95,4 @@ class Pipeline:
                 for item in ctx.candidates
             ],
         )
-        return make_answer(ctx.query, rcode=dns.rcode.SERVFAIL)
+        return make_resolver_answer(ctx.query, rcode=dns.rcode.SERVFAIL)
