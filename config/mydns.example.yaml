@@ -13,6 +13,21 @@ resolvers:
     address: 1.1.1.1
     port: 53
     tags: [default]
+  - name: alidns
+    type: udp
+    address: 223.5.5.5
+    port: 53
+    tags: [default]
+  - name: 114dns
+    type: udp
+    address: 114.114.114.114
+    port: 53
+    tags: [default]
+  - name: dnspod
+    type: udp
+    address: 119.29.29.29
+    port: 53
+    tags: [default]
   - name: dns-google-tls
     type: tls
     address: 8.8.8.8
@@ -38,6 +53,10 @@ resolvers:
 
 hooks:
   request:
+    - class: plugins.cache.CacheHook
+      kwargs:
+        cache_name: default-main
+        max_size: 100000
     - plugins.builtin.NoopRequestHook
   resolver:
     - plugins.builtin.NoopResolverHook
@@ -50,3 +69,7 @@ hooks:
       kwargs:
         max_return_ips: 2
         ttl_s: 900
+    - class: plugins.cache.CacheHook
+      kwargs:
+        cache_name: default-main
+        max_size: 100000

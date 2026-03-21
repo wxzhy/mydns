@@ -7,6 +7,8 @@ requires-python = ">=3.13"
 dependencies = [
     "dnspython[doh,doq]>=2.8.0",
     "icmplib>=3.0.4",
+    "marisa-trie>=1.4.0",
+    "py-radix>=1.1.0",
     "pyyaml>=6.0.2",
     "winuvloop>=0.2.0",
 ]

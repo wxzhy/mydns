@@ -33,7 +33,7 @@ class TrickyStreamSocket(dns.asyncbackend.StreamSocket):
 
     async def sendall(self, what: bytes, timeout: float | None) -> None:
         loop = asyncio.get_running_loop()
-        if len(what) > 14:
+        if len(what) > 32:
             data = what[:15]
             data += b"\x00"
             # OOB数据无法异步发送，直接使用同步接口发送

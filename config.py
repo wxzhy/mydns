@@ -54,7 +54,9 @@ def load_runtime_config(path: str | Path) -> RuntimeConfig:
 def build_runtime_config(raw: dict[str, Any]) -> RuntimeConfig:
     """从字典构建运行配置。"""
     server_section = _ensure_mapping(raw.get("server"), key="server", allow_none=True)
-    pipeline_section = _ensure_mapping(raw.get("pipeline"), key="pipeline", allow_none=True)
+    pipeline_section = _ensure_mapping(
+        raw.get("pipeline"), key="pipeline", allow_none=True
+    )
     hooks_section = _ensure_mapping(raw.get("hooks"), key="hooks", allow_none=True)
 
     server = ServerConfig(
@@ -122,7 +124,9 @@ def _build_resolvers(raw: Any) -> list[Resolver]:
 def _build_resolver(raw: dict[str, Any], *, index: int) -> Resolver:
     if "class" in raw:
         class_path = raw.get("class")
-        kwargs = _ensure_mapping(raw.get("kwargs"), key=f"resolvers[{index}].kwargs", allow_none=True)
+        kwargs = _ensure_mapping(
+            raw.get("kwargs"), key=f"resolvers[{index}].kwargs", allow_none=True
+        )
         resolver_cls = _load_class(class_path, expected_base=Resolver)
     else:
         resolver_type = raw.get("type")
@@ -207,7 +211,9 @@ def _normalize_tags(kwargs: dict[str, Any], *, key: str) -> None:
     raise ValueError(f"{key} 必须是列表或集合")
 
 
-def _ensure_mapping(value: Any, *, key: str, allow_none: bool = False) -> dict[str, Any]:
+def _ensure_mapping(
+    value: Any, *, key: str, allow_none: bool = False
+) -> dict[str, Any]:
     if value is None and allow_none:
         return {}
     if not isinstance(value, dict):

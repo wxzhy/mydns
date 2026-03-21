@@ -10,6 +10,7 @@ from pathlib import Path
 
 from config import build_runtime_config, load_runtime_config
 from plugins.builtin import NoopRequestHook
+from plugins.tagset import TagSetRequestHook
 from plugins.speedcheck import SpeedCheckResolverHook
 from resolver.quic_resolver import QuicUpstreamResolver
 from resolver.udp_resolver import UdpUpstreamResolver
@@ -90,6 +91,29 @@ class TestConfig(unittest.TestCase):
         }
         with self.assertRaises(ValueError):
             build_runtime_config(raw)
+
+    def test_load_runtime_config_with_domainset_and_ipset(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mydns-tagsets-") as td:
+            base = Path(td)
+            (base / "domains.txt").write_text("example.cn\n", encoding="utf-8")
+            (base / "ips.txt").write_text("10.0.0.0/8\n", encoding="utf-8")
+            (base / "mydns.yaml").write_text(
+                textwrap.dedent(
+                    """
+                    domainset:
+                      cn: domains.txt
+                    ipset:
+                      office: ips.txt
+                    """
+                ),
+                encoding="utf-8",
+            )
+
+            runtime = load_runtime_config(base / "mydns.yaml")
+            self.assertIsInstance(runtime.pipeline.request_hooks[0], TagSetRequestHook)
+            hook = runtime.pipeline.request_hooks[0]
+            self.assertIn("cn", hook.domainset_by_tag)
+            self.assertIn("office", hook.ipset_by_tag)
 
     def _write_temp_yaml(self, content: str) -> Path:
         fd, raw_path = tempfile.mkstemp(prefix="mydns-config-", suffix=".yaml")

@@ -45,7 +45,7 @@ class TrickyDatagramSocket(dns.asyncbackend.DatagramSocket):
         for _ in range(5):
             data = await _wait_for(loop.sock_recvfrom(self._socket, size), timeout)
             # 伪造包不包含additional，此处检查
-            if len(data) > 12 and data[10:12] == b"\x00\x01":
+            if len(data) > 32 and data[10:12] == b"\x00\x01":
                 return data
         raise asyncio.TimeoutError("UDP recvfrom timeout")
 

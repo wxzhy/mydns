@@ -1,0 +1,82 @@
+"""缓存插件。"""
+
+from __future__ import annotations
+
+from typing import Iterable
+
+import dns.rcode
+
+from core.cache import AnswerLRUCache, build_cache_key
+from core.context import QueryContext
+from core.hooks import RequestHook, ResponseHook
+from logger import get_logger
+
+
+logger = get_logger("plugins.cache")
+_CACHE_REGISTRY: dict[str, AnswerLRUCache] = {}
+
+
+def get_shared_cache(
+    *,
+    cache_name: str = "default",
+    max_size: int = 100000,
+) -> AnswerLRUCache:
+    cache = _CACHE_REGISTRY.get(cache_name)
+    if cache is None:
+        cache = AnswerLRUCache(max_size=max_size)
+        _CACHE_REGISTRY[cache_name] = cache
+    return cache
+
+
+class CacheHook(RequestHook, ResponseHook):
+    """请求阶段读缓存、响应阶段写缓存。"""
+
+    def __init__(
+        self,
+        *,
+        cache: AnswerLRUCache | None = None,
+        cache_name: str = "default",
+        max_size: int = 100000,
+        cacheable_rcodes: Iterable[dns.rcode.Rcode] | None = None,
+    ) -> None:
+        self.cache = cache or get_shared_cache(cache_name=cache_name, max_size=max_size)
+        if cacheable_rcodes is None:
+            self.cacheable_rcodes = {dns.rcode.NOERROR}
+        else:
+            self.cacheable_rcodes = {dns.rcode.Rcode(x) for x in cacheable_rcodes}
+
+    async def on_request(self, ctx: QueryContext) -> None:
+        key = build_cache_key(ctx.query)
+        answer = self.cache.get(key)
+        ctx.state["cache_key"] = key
+        if answer is None:
+            ctx.state["cache_hit"] = False
+            return
+        ctx.state["cache_hit"] = True
+        ctx.final_answer = answer
+        ctx.stop = True
+        logger.debug(
+            "缓存命中 qname=%s qtype=%s",
+            ctx.query.qname.to_text(),
+            ctx.query.qtype,
+        )
+
+    async def on_response(self, ctx: QueryContext) -> None:
+        if ctx.state.get("cache_hit"):
+            return
+        answer = ctx.final_answer
+        if answer is None:
+            return
+        rcode = answer.response.rcode()
+        if rcode not in self.cacheable_rcodes:
+            return
+        key = ctx.state.get("cache_key")
+        if key is None:
+            key = build_cache_key(ctx.query)
+        self.cache.put(key, answer)
+        logger.debug(
+            "缓存写入 qname=%s qtype=%s rcode=%s",
+            ctx.query.qname.to_text(),
+            ctx.query.qtype,
+            rcode,
+        )
