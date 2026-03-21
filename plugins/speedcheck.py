@@ -12,7 +12,7 @@ import dns.rdataclass
 import dns.rdatatype
 import dns.resolver
 import dns.rrset
-
+import time
 from core.context import QueryContext
 from core.hooks import ResolverHook, ResponseHook
 from core.models import ResolverResult
@@ -202,6 +202,8 @@ class RewriteAnswerByRTTHook(ResponseHook):
             ttl_s=self.ttl_s,
         )
         answer.rrset = rewritten
+        # 重写过期时间
+        answer.expiration = time.time() + self.ttl_s
         cname_count = len(chain.cnames)
 
         logger.debug(

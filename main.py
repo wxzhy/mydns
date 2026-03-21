@@ -16,7 +16,9 @@ logger = get_logger("main")
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="插件式流水线 DNS 服务器")
-    parser.add_argument("--config", help="YAML 配置文件路径")
+    parser.add_argument(
+        "--config", help="YAML 配置文件路径", default="config/mydns.example.yaml"
+    )
     parser.add_argument("--host", help="监听地址（可覆盖配置文件）")
     parser.add_argument("--port", type=int, help="监听端口（可覆盖配置文件）")
     return parser.parse_args()
