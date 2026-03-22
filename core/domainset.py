@@ -89,9 +89,10 @@ class DomainSet:
         cache_file: str | Path | None = None,
     ) -> None:
         self.clear()
+        normalized_cache_file = _normalize_cache_file(cache_file)
         cache_path = (
-            _resolve_path(cache_file, base_dir=base_dir)
-            if cache_file is not None
+            _resolve_path(normalized_cache_file, base_dir=base_dir)
+            if normalized_cache_file is not None
             else None
         )
         if cache_path is not None and cache_path.exists():
@@ -158,3 +159,14 @@ def _resolve_path(path: str | Path, *, base_dir: Path | None) -> Path:
     if raw.is_absolute() or base_dir is None:
         return raw
     return base_dir / raw
+
+
+def _normalize_cache_file(cache_file: str | Path | None) -> str | Path | None:
+    if cache_file is None:
+        return None
+    if isinstance(cache_file, str):
+        value = cache_file.strip()
+        if not value:
+            return None
+        return value
+    return cache_file

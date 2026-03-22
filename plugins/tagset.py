@@ -20,14 +20,21 @@ class TagSetRequestHook(RequestHook):
         self.domainset_by_tag: dict[str, list[str]] = {
             tag: [] for tag in domainset.tags
         }
+        self.ipset_by_tag: dict[str, list[str]] = {tag: [] for tag in ipset.tags}
 
     async def on_request(self, ctx: QueryContext) -> None:
         qname_text = ctx.query.qname.to_text().rstrip(".").lower()
         matched_tags = domainset.match_tags(qname_text)
 
+        if ctx.query.client_addr is not None:
+            client_ip = ctx.query.client_addr[0]
+            matched_tags.update(ipset.match_tags(client_ip))
+
         if not matched_tags:
             return
 
+        # 一旦命中专用 tag，就替换默认 default tag。
+        ctx.tags.discard("default")
         ctx.tags.update(matched_tags)
         logger.debug(
             "标签命中 qname=%s client=%s add=%s tags=%s",

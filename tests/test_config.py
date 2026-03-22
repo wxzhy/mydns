@@ -147,6 +147,33 @@ class TestConfig(unittest.TestCase):
             self.assertTrue(domainset.match("www.example.cn", "cn"))
             self.assertFalse(domainset.match("www.changed.cn", "cn"))
 
+    def test_domainset_empty_cache_file_should_skip_cache(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mydns-domainset-no-cache-") as td:
+            base = Path(td)
+            domains_file = base / "domains.txt"
+            config_file = base / "mydns.yaml"
+            domains_file.write_text("example.cn\n", encoding="utf-8")
+            config_file.write_text(
+                textwrap.dedent(
+                    """
+                    domainset_cache_file: ""
+                    domainset:
+                      cn:
+                        - domains.txt
+                    """
+                ),
+                encoding="utf-8",
+            )
+
+            load_runtime_config(config_file)
+            self.assertTrue(domainset.match("www.example.cn", "cn"))
+
+            domains_file.write_text("changed.cn\n", encoding="utf-8")
+            load_runtime_config(config_file)
+            # cache_file 为空应跳过缓存读写，按最新文本规则重建。
+            self.assertFalse(domainset.match("www.example.cn", "cn"))
+            self.assertTrue(domainset.match("www.changed.cn", "cn"))
+
     def _write_temp_yaml(self, content: str) -> Path:
         fd, raw_path = tempfile.mkstemp(prefix="mydns-config-", suffix=".yaml")
         os.close(fd)

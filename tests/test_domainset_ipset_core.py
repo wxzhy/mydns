@@ -97,7 +97,7 @@ class TestTagSetHook(unittest.IsolatedAsyncioTestCase):
                 )
 
             await hook.on_request(ctx)
-            self.assertEqual(ctx.tags, {"default", "cn", "office"})
+            self.assertEqual(ctx.tags, {"cn", "office"})
         finally:
             init_domainset({})
             init_ipset({})

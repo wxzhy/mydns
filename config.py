@@ -300,9 +300,12 @@ def _normalize_file_list(raw_value: Any, *, key: str) -> list[str]:
 def _normalize_optional_path(raw_value: Any, *, key: str) -> str | None:
     if raw_value is None:
         return None
-    if not isinstance(raw_value, str) or not raw_value.strip():
-        raise ValueError(f"{key} 必须是非空字符串路径")
-    return raw_value.strip()
+    if not isinstance(raw_value, str):
+        raise ValueError(f"{key} 必须是字符串路径")
+    value = raw_value.strip()
+    if not value:
+        return None
+    return value
 
 
 def _default_request_hooks() -> list[RequestHook]:
