@@ -10,9 +10,12 @@ from typing import Any
 
 import yaml
 
+from core.domainset import domainset, init_domainset
 from core.hooks import RequestHook, ResolverHook, ResponseHook
+from core.ipset import init_ipset, ipset
 from core.pipeline import Pipeline
 from plugins.builtin import NoopRequestHook, NoopResolverHook, NoopResponseHook
+from plugins.tagset import TagSetRequestHook
 from plugins.speedcheck import RewriteAnswerByRTTHook, SpeedCheckResolverHook
 from resolver.resolver import Resolver
 
@@ -48,16 +51,28 @@ def load_runtime_config(path: str | Path) -> RuntimeConfig:
     if not config_path.exists():
         raise FileNotFoundError(f"配置文件不存在: {config_path}")
     raw = _load_yaml_mapping(config_path)
-    return build_runtime_config(raw)
+    return build_runtime_config(raw, base_dir=config_path.parent)
 
 
-def build_runtime_config(raw: dict[str, Any]) -> RuntimeConfig:
+def build_runtime_config(
+    raw: dict[str, Any],
+    *,
+    base_dir: Path | None = None,
+) -> RuntimeConfig:
     """从字典构建运行配置。"""
     server_section = _ensure_mapping(raw.get("server"), key="server", allow_none=True)
     pipeline_section = _ensure_mapping(
         raw.get("pipeline"), key="pipeline", allow_none=True
     )
     hooks_section = _ensure_mapping(raw.get("hooks"), key="hooks", allow_none=True)
+    domainset_section = _ensure_mapping(
+        raw.get("domainset"), key="domainset", allow_none=True
+    )
+    ipset_section = _ensure_mapping(raw.get("ipset"), key="ipset", allow_none=True)
+    domainset_cache_file = _normalize_optional_path(
+        raw.get("domainset_cache_file"),
+        key="domainset_cache_file",
+    )
 
     server = ServerConfig(
         host=str(server_section.get("host", "127.0.0.1")),
@@ -89,6 +104,14 @@ def build_runtime_config(raw: dict[str, Any]) -> RuntimeConfig:
         expected_base=ResponseHook,
         default_factory=_default_response_hooks,
     )
+    tagset_hook = _build_tagset_hook(
+        domainset_section=domainset_section,
+        ipset_section=ipset_section,
+        base_dir=base_dir,
+        domainset_cache_file=domainset_cache_file,
+    )
+    if tagset_hook is not None:
+        request_hooks = [tagset_hook, *request_hooks]
 
     pipeline = Pipeline(
         resolvers=resolvers,
@@ -219,6 +242,67 @@ def _ensure_mapping(
     if not isinstance(value, dict):
         raise ValueError(f"{key} 必须是对象")
     return dict(value)
+
+
+def _build_tagset_hook(
+    *,
+    domainset_section: dict[str, Any],
+    ipset_section: dict[str, Any],
+    base_dir: Path | None,
+    domainset_cache_file: str | None,
+) -> TagSetRequestHook | None:
+    domainset_mapping = _normalize_tag_to_files(
+        domainset_section,
+        key="domainset",
+    )
+    ipset_mapping = _normalize_tag_to_files(
+        ipset_section,
+        key="ipset",
+    )
+    init_domainset(
+        domainset_mapping,
+        base_dir=base_dir,
+        cache_file=domainset_cache_file,
+    )
+    init_ipset(ipset_mapping, base_dir=base_dir)
+    if not domainset.tags and not ipset.tags:
+        return None
+    return TagSetRequestHook()
+
+
+def _normalize_tag_to_files(raw: dict[str, Any], *, key: str) -> dict[str, list[str]]:
+    output: dict[str, list[str]] = {}
+    for raw_tag, raw_value in raw.items():
+        if not isinstance(raw_tag, str) or not raw_tag.strip():
+            raise ValueError(f"{key} 的 tag 必须是非空字符串")
+        tag = raw_tag.strip()
+        values = _normalize_file_list(raw_value, key=f"{key}.{tag}")
+        output[tag] = values
+    return output
+
+
+def _normalize_file_list(raw_value: Any, *, key: str) -> list[str]:
+    if isinstance(raw_value, str):
+        value = raw_value.strip()
+        if not value:
+            raise ValueError(f"{key} 路径不能为空")
+        return [value]
+    if isinstance(raw_value, (list, tuple)):
+        values: list[str] = []
+        for index, item in enumerate(raw_value):
+            if not isinstance(item, str) or not item.strip():
+                raise ValueError(f"{key}[{index}] 必须是非空字符串路径")
+            values.append(item.strip())
+        return values
+    raise ValueError(f"{key} 必须是字符串或字符串列表")
+
+
+def _normalize_optional_path(raw_value: Any, *, key: str) -> str | None:
+    if raw_value is None:
+        return None
+    if not isinstance(raw_value, str) or not raw_value.strip():
+        raise ValueError(f"{key} 必须是非空字符串路径")
+    return raw_value.strip()
 
 
 def _default_request_hooks() -> list[RequestHook]:

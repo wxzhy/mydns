@@ -7,6 +7,19 @@ server:
 pipeline:
   upstream_timeout_s: 0.8
 
+# tag: txt路径 或 txt路径列表
+domainset:
+  cn:
+    - rules/domainset.cn.txt
+
+# 可选：domainset 缓存文件。存在时优先加载；不存在则初始化后自动写入。
+domainset_cache_file: cache/domainset.cache
+
+# tag: txt路径 或 txt路径列表
+ipset:
+  cn:
+    - rules/ipset.cn.txt
+
 resolvers:
   - name: cloudflare
     type: udp

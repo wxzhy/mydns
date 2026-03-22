@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 
 from config import build_runtime_config, load_runtime_config
+from core.domainset import domainset
 from plugins.builtin import NoopRequestHook
 from plugins.tagset import TagSetRequestHook
 from plugins.speedcheck import SpeedCheckResolverHook
@@ -101,9 +102,11 @@ class TestConfig(unittest.TestCase):
                 textwrap.dedent(
                     """
                     domainset:
-                      cn: domains.txt
+                      cn:
+                        - domains.txt
                     ipset:
-                      office: ips.txt
+                      office:
+                        - ips.txt
                     """
                 ),
                 encoding="utf-8",
@@ -114,6 +117,35 @@ class TestConfig(unittest.TestCase):
             hook = runtime.pipeline.request_hooks[0]
             self.assertIn("cn", hook.domainset_by_tag)
             self.assertIn("office", hook.ipset_by_tag)
+
+    def test_domainset_cache_file_should_prefer_cache(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mydns-domainset-cache-") as td:
+            base = Path(td)
+            domains_file = base / "domains.txt"
+            config_file = base / "mydns.yaml"
+            cache_file = base / "domainset.cache"
+            domains_file.write_text("example.cn\n", encoding="utf-8")
+            config_file.write_text(
+                textwrap.dedent(
+                    """
+                    domainset_cache_file: domainset.cache
+                    domainset:
+                      cn:
+                        - domains.txt
+                    """
+                ),
+                encoding="utf-8",
+            )
+
+            load_runtime_config(config_file)
+            self.assertTrue(cache_file.exists())
+            self.assertTrue(domainset.match("www.example.cn", "cn"))
+
+            domains_file.write_text("changed.cn\n", encoding="utf-8")
+            load_runtime_config(config_file)
+            # 缓存命中时优先使用缓存文件而不是重读规则文本。
+            self.assertTrue(domainset.match("www.example.cn", "cn"))
+            self.assertFalse(domainset.match("www.changed.cn", "cn"))
 
     def _write_temp_yaml(self, content: str) -> Path:
         fd, raw_path = tempfile.mkstemp(prefix="mydns-config-", suffix=".yaml")
