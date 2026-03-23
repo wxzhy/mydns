@@ -93,6 +93,29 @@ class TestConfig(unittest.TestCase):
         with self.assertRaises(ValueError):
             build_runtime_config(raw)
 
+    def test_removed_resolver_options_should_raise(self) -> None:
+        cases = [
+            ("tcp", "source", "127.0.0.1"),
+            ("tls", "ssl_context", object()),
+            ("quic", "source_port", 1053),
+            ("https", "post", True),
+        ]
+        for resolver_type, key, value in cases:
+            raw = {
+                "resolvers": [
+                    {
+                        "type": resolver_type,
+                        "name": "x",
+                        "address": "dns.example"
+                        if resolver_type == "https"
+                        else "1.1.1.1",
+                        key: value,
+                    }
+                ]
+            }
+            with self.assertRaises(ValueError):
+                build_runtime_config(raw)
+
     def test_load_runtime_config_with_domainset_and_ipset(self) -> None:
         with tempfile.TemporaryDirectory(prefix="mydns-tagsets-") as td:
             base = Path(td)

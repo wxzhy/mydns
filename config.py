@@ -44,6 +44,13 @@ _RESOLVER_TYPES: dict[str, str] = {
     "quic": "resolver.quic_resolver.QuicUpstreamResolver",
 }
 
+_REMOVED_RESOLVER_OPTIONS: dict[str, set[str]] = {
+    "tcp": {"source", "source_port"},
+    "tls": {"source", "source_port", "ssl_context"},
+    "quic": {"source", "source_port"},
+    "https": {"source", "source_port", "http_version", "family", "post"},
+}
+
 
 def load_runtime_config(path: str | Path) -> RuntimeConfig:
     """从 YAML 文件加载运行配置。"""
@@ -160,6 +167,11 @@ def _build_resolver(raw: dict[str, Any], *, index: int) -> Resolver:
             raise ValueError(f"不支持的 resolver 类型: {resolver_type}")
         resolver_cls = _load_class(resolver_class_path, expected_base=Resolver)
         kwargs = {k: v for k, v in raw.items() if k != "type"}
+        _validate_removed_resolver_options(
+            resolver_type,
+            kwargs,
+            index=index,
+        )
 
     _normalize_tags(kwargs, key=f"resolvers[{index}].tags")
     try:
@@ -232,6 +244,20 @@ def _normalize_tags(kwargs: dict[str, Any], *, key: str) -> None:
         kwargs["tags"] = {str(x) for x in tags}
         return
     raise ValueError(f"{key} 必须是列表或集合")
+
+
+def _validate_removed_resolver_options(
+    resolver_type: str,
+    kwargs: dict[str, Any],
+    *,
+    index: int,
+) -> None:
+    removed_options = _REMOVED_RESOLVER_OPTIONS.get(resolver_type, set())
+    for option in removed_options:
+        if option in kwargs:
+            raise ValueError(
+                f"resolvers[{index}].{option} 已移除，请从 {resolver_type} 配置中删除"
+            )
 
 
 def _ensure_mapping(

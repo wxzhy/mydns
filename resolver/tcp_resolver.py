@@ -19,15 +19,11 @@ class TcpUpstreamResolver(Resolver):
         name: str,
         address: str,
         port: int = 53,
-        source: str | None = None,
-        source_port: int = 0,
         tags: set[str] | None = None,
     ) -> None:
         self.name = name
         self.address = address
         self.port = port
-        self.source = source
-        self.source_port = source_port
         self.tags = tags or {"default"}
 
     async def resolve(self, query: Query, timeout_s: float) -> dns.resolver.Answer:
@@ -37,8 +33,6 @@ class TcpUpstreamResolver(Resolver):
             where=self.address,
             port=self.port,
             timeout=timeout_s,
-            source=self.source,
-            source_port=self.source_port,
         )
         return answer_from_response(
             query,

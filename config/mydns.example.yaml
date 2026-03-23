@@ -21,6 +21,7 @@ ipset:
     - rules/ipset.cn.txt
 
 resolvers:
+  # 已移除冗余参数：source/source_port/http_version/ssl_context/family/post
   - name: cloudflare
     type: udp
     address: 1.1.1.1

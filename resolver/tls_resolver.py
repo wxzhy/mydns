@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import ssl
-
 import dns.asyncquery
 import dns.resolver
 
@@ -23,9 +21,6 @@ class TlsUpstreamResolver(Resolver):
         port: int = 853,
         server_hostname: str | None = None,
         verify: bool | str = True,
-        ssl_context: ssl.SSLContext | None = None,
-        source: str | None = None,
-        source_port: int = 0,
         tags: set[str] | None = None,
     ) -> None:
         self.name = name
@@ -33,9 +28,6 @@ class TlsUpstreamResolver(Resolver):
         self.port = port
         self.server_hostname = server_hostname
         self.verify = verify
-        self.ssl_context = ssl_context
-        self.source = source
-        self.source_port = source_port
         self.tags = tags or {"default"}
 
     async def resolve(self, query: Query, timeout_s: float) -> dns.resolver.Answer:
@@ -45,11 +37,8 @@ class TlsUpstreamResolver(Resolver):
             where=self.address,
             port=self.port,
             timeout=timeout_s,
-            source=self.source,
-            source_port=self.source_port,
             server_hostname=self.server_hostname,
             verify=self.verify,
-            ssl_context=self.ssl_context,
         )
         return answer_from_response(
             query,

@@ -107,6 +107,30 @@ class TestMultiResolversAndTricks(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(captured["kwargs"]["where"], "https://dns.example")
         self.assertEqual(captured["kwargs"]["path"], "/dns-query")
         self.assertEqual(captured["kwargs"]["bootstrap_address"], "1.1.1.1")
+        self.assertIn("client", captured["kwargs"])
+
+    async def test_https_resolver_should_reuse_shared_client(self) -> None:
+        query = _make_query()
+        clients: list[object] = []
+        original = dns.asyncquery.https
+
+        async def fake_https(
+            request: dns.message.Message, **kwargs: object
+        ) -> dns.message.Message:
+            clients.append(kwargs["client"])
+            return _build_response(request)
+
+        dns.asyncquery.https = fake_https
+        try:
+            resolver1 = HttpsUpstreamResolver(name="https1", address="dns.example")
+            resolver2 = HttpsUpstreamResolver(name="https2", address="dns.example")
+            await resolver1.resolve(query, timeout_s=0.5)
+            await resolver2.resolve(query, timeout_s=0.5)
+        finally:
+            dns.asyncquery.https = original
+
+        self.assertEqual(len(clients), 2)
+        self.assertIs(clients[0], clients[1])
 
     async def test_quic_resolver_uses_asyncquery_quic(self) -> None:
         query = _make_query()

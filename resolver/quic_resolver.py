@@ -22,8 +22,6 @@ class QuicUpstreamResolver(Resolver):
         verify: bool | str = True,
         hostname: str | None = None,
         server_hostname: str | None = None,
-        source: str | None = None,
-        source_port: int = 0,
         tags: set[str] | None = None,
     ) -> None:
         self.name = name
@@ -32,8 +30,6 @@ class QuicUpstreamResolver(Resolver):
         self.verify = verify
         self.hostname = hostname
         self.server_hostname = server_hostname
-        self.source = source
-        self.source_port = source_port
         self.tags = tags or {"default"}
 
     async def resolve(self, query: Query, timeout_s: float) -> dns.resolver.Answer:
@@ -43,8 +39,6 @@ class QuicUpstreamResolver(Resolver):
             where=self.address,
             timeout=timeout_s,
             port=self.port,
-            source=self.source,
-            source_port=self.source_port,
             verify=self.verify,
             hostname=self.hostname,
             server_hostname=self.server_hostname,
