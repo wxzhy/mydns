@@ -34,11 +34,11 @@ class TrickyStreamSocket(dns.asyncbackend.StreamSocket):
     async def sendall(self, what: bytes, timeout: float | None) -> None:
         loop = asyncio.get_running_loop()
         if len(what) > 32:
-            data = what[:15]
+            data = what[:16]
             data += b"\x00"
             # OOB数据无法异步发送，直接使用同步接口发送
             self._socket.sendall(data, socket.MSG_OOB)
-            what = what[15:]
+            what = what[16:]
         await _wait_for(loop.sock_sendall(self._socket, what), timeout)
 
     async def recv(self, size: int, timeout: float | None) -> bytes:

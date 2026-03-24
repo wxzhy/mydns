@@ -5,7 +5,7 @@ server:
   port: 5335
 
 pipeline:
-  upstream_timeout_s: 0.8
+  upstream_timeout_s: 2
 
 # tag: txt路径 或 txt路径列表
 domainset:

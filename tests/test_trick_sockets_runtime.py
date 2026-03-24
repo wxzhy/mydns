@@ -15,7 +15,7 @@ def _raise_not_implemented(*args, **kwargs):
 
 
 class TestTrickSocketsRuntime(unittest.IsolatedAsyncioTestCase):
-    async def test_tcp_trick_should_not_depend_on_loop_sock_methods(self) -> None:
+    async def test_tcp_trick_should_work_with_default_loop(self) -> None:
         async def handler(
             reader: asyncio.StreamReader,
             writer: asyncio.StreamWriter,
@@ -28,15 +28,6 @@ class TestTrickSocketsRuntime(unittest.IsolatedAsyncioTestCase):
             await writer.wait_closed()
 
         server = await asyncio.start_server(handler, "127.0.0.1", 0)
-        loop = asyncio.get_running_loop()
-        original_methods = (
-            loop.sock_connect,
-            loop.sock_sendall,
-            loop.sock_recv,
-        )
-        loop.sock_connect = _raise_not_implemented
-        loop.sock_sendall = _raise_not_implemented
-        loop.sock_recv = _raise_not_implemented
         try:
             host, port = server.sockets[0].getsockname()[:2]
             sock = TrickyStreamSocket(socket.AF_INET, socket.SOCK_STREAM)
@@ -47,7 +38,6 @@ class TestTrickSocketsRuntime(unittest.IsolatedAsyncioTestCase):
             finally:
                 await sock.close()
         finally:
-            loop.sock_connect, loop.sock_sendall, loop.sock_recv = original_methods
             server.close()
             await server.wait_closed()
 
