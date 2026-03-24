@@ -6,9 +6,8 @@ import ssl
 
 import dns.asyncquery
 import dns.asyncresolver
-import dns.resolver
 
-from core.answer import answer_from_response
+from core.answer import Answer
 from core.models import Query
 from resolver.resolver import Resolver, build_request_message
 
@@ -43,7 +42,7 @@ class HttpsUpstreamResolver(Resolver):
         self.resolver = resolver
         self.tags = tags or {"default"}
 
-    async def resolve(self, query: Query, timeout_s: float) -> dns.resolver.Answer:
+    async def resolve(self, query: Query, timeout_s: float) -> Answer:
         request = build_request_message(query, use_edns=True)
         response = await dns.asyncquery.https(
             request,
@@ -56,7 +55,7 @@ class HttpsUpstreamResolver(Resolver):
             bootstrap_address=self.bootstrap_address,
             resolver=self.resolver,
         )
-        return answer_from_response(
+        return Answer.from_response(
             query,
             response,
             nameserver=self.address,

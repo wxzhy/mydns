@@ -13,6 +13,7 @@ import dns.rdatatype
 import dns.resolver
 import dns.rrset
 import time
+from core.answer import Answer
 from core.context import QueryContext
 from core.hooks import ResolverHook, ResponseHook
 from core.models import ResolverResult
@@ -155,6 +156,7 @@ class RewriteAnswerByRTTHook(ResponseHook):
                 qname_text,
             )
             return
+        assert isinstance(answer, Answer)
         if answer.response.rcode() != dns.rcode.NOERROR:
             logger.debug(
                 "响应改写跳过 qname=%s qtype=%s reason=rcode_not_noerror rcode=%s",
@@ -201,9 +203,10 @@ class RewriteAnswerByRTTHook(ResponseHook):
             ips=selected_ips,
             ttl_s=self.ttl_s,
         )
-        answer.rrset = rewritten
-        # 重写过期时间
-        answer.expiration = time.time() + self.ttl_s
+        answer.replace_rrset(
+            rewritten,
+            preserve_expiration=time.time() + self.ttl_s,
+        )
         cname_count = len(chain.cnames)
 
         logger.debug(
@@ -218,7 +221,7 @@ class RewriteAnswerByRTTHook(ResponseHook):
 
 
 def _extract_ips(
-    answer: dns.resolver.Answer,
+    answer: Answer,
     *,
     qtype: dns.rdatatype.RdataType,
 ) -> list[str]:

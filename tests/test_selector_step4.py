@@ -6,11 +6,10 @@ import unittest
 
 import dns.name
 import dns.rcode
-import dns.resolver
 import dns.rdatatype
 import dns.rrset
 
-from core.answer import make_answer
+from core.answer import Answer
 from core.context import QueryContext
 from core.models import Query, ResolverResult
 from upstream.selector import select_best_answer
@@ -24,7 +23,7 @@ def _make_query(qtype: dns.rdatatype.RdataType) -> Query:
     )
 
 
-def _answer_with_a(ip: str) -> dns.resolver.Answer:
+def _answer_with_a(ip: str) -> Answer:
     cname_1 = dns.rrset.from_text(
         "www.example.com.",
         60,
@@ -40,14 +39,14 @@ def _answer_with_a(ip: str) -> dns.resolver.Answer:
         "edge.example.com.",
     )
     a_rr = dns.rrset.from_text("edge.example.com.", 60, "IN", "A", ip)
-    return make_answer(
+    return Answer.from_query(
         _make_query(dns.rdatatype.A),
         rcode=dns.rcode.NOERROR,
         rrsets=[cname_1, cname_2, a_rr],
     )
 
 
-def _answer_with_aaaa(ipv6: str) -> dns.resolver.Answer:
+def _answer_with_aaaa(ipv6: str) -> Answer:
     cname = dns.rrset.from_text(
         "www.example.com.",
         60,
@@ -56,7 +55,7 @@ def _answer_with_aaaa(ipv6: str) -> dns.resolver.Answer:
         "edge.example.com.",
     )
     aaaa_rr = dns.rrset.from_text("edge.example.com.", 60, "IN", "AAAA", ipv6)
-    return make_answer(
+    return Answer.from_query(
         _make_query(dns.rdatatype.AAAA),
         rcode=dns.rcode.NOERROR,
         rrsets=[cname, aaaa_rr],
@@ -98,17 +97,17 @@ class TestSelectorStep4(unittest.TestCase):
         self.assertEqual(ips, {"2001:db8::2"})
 
     def test_non_a_type_fastest_response_passthrough(self) -> None:
-        txt_slow = make_answer(
+        txt_slow = Answer.from_query(
             _make_query(dns.rdatatype.TXT),
             rcode=dns.rcode.NOERROR,
             rrsets=[dns.rrset.from_text("example.com.", 60, "IN", "TXT", '"slow"')],
         )
-        txt_fast = make_answer(
+        txt_fast = Answer.from_query(
             _make_query(dns.rdatatype.TXT),
             rcode=dns.rcode.NOERROR,
             rrsets=[dns.rrset.from_text("example.com.", 60, "IN", "TXT", '"fast"')],
         )
-        nxdomain = make_answer(_make_query(dns.rdatatype.TXT), rcode=dns.rcode.NXDOMAIN)
+        nxdomain = Answer.from_query(_make_query(dns.rdatatype.TXT), rcode=dns.rcode.NXDOMAIN)
 
         ctx = QueryContext(query=_make_query(dns.rdatatype.TXT))
         ctx.candidates = [

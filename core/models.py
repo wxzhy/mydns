@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-
 import dns.edns
+import dns.message
 import dns.name
 import dns.rdatatype
-import dns.resolver
-import dns.message
+from core.answer import Answer
 
 
 @dataclass(slots=True)
@@ -28,7 +27,7 @@ class ResolverResult:
     """单个上游解析器的结果。"""
 
     resolver_name: str
-    answer: dns.resolver.Answer | None
+    answer: Answer | None
     elapsed_ms: float | None
     error: Exception | None = None
 

@@ -5,9 +5,8 @@ from __future__ import annotations
 from math import inf
 
 import dns.rcode
-import dns.resolver
 
-from core.answer import make_resolver_answer
+from core.answer import Answer
 from core.context import QueryContext
 from core.models import ResolverResult
 from logger import get_logger
@@ -16,7 +15,7 @@ from logger import get_logger
 logger = get_logger("upstream.selector")
 
 
-def select_best_answer(ctx: QueryContext) -> dns.resolver.Answer:
+def select_best_answer(ctx: QueryContext) -> Answer:
     """选择基础结果：优先最快正常响应。"""
     candidates = [x for x in ctx.candidates if x.answer is not None]
     if not candidates:
@@ -25,7 +24,7 @@ def select_best_answer(ctx: QueryContext) -> dns.resolver.Answer:
             ctx.query.qname.to_text(),
             ctx.query.qtype,
         )
-        return make_resolver_answer(ctx.query, rcode=dns.rcode.SERVFAIL)
+        return Answer.from_query(ctx.query, rcode=dns.rcode.SERVFAIL)
     selected = _select_fastest_normal(candidates)
     logger.debug(
         "基础结果选择完成 qname=%s qtype=%s selected_rcode=%s rrset_count=%s",
@@ -37,7 +36,7 @@ def select_best_answer(ctx: QueryContext) -> dns.resolver.Answer:
     return selected
 
 
-def _select_fastest_normal(candidates: list[ResolverResult]) -> dns.resolver.Answer:
+def _select_fastest_normal(candidates: list[ResolverResult]) -> Answer:
     """返回最快 NOERROR；若不存在则回退最快响应。"""
     ordered = sorted(candidates, key=_candidate_speed_key)
     for item in ordered:

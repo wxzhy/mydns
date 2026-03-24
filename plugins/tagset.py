@@ -6,7 +6,7 @@ import dns.rcode
 import dns.rdatatype
 import dns.rrset
 
-from core.answer import make_resolver_answer
+from core.answer import Answer
 from core.context import QueryContext
 from core.domainset import domainset
 from core.hooks import RequestHook
@@ -75,7 +75,7 @@ def _build_ads_answer(ctx: QueryContext):
             "A",
             _ADS_A,
         )
-        return make_resolver_answer(
+        return Answer.from_query(
             ctx.query,
             rcode=dns.rcode.NOERROR,
             rrsets=[rrset],
@@ -88,9 +88,9 @@ def _build_ads_answer(ctx: QueryContext):
             "AAAA",
             _ADS_AAAA,
         )
-        return make_resolver_answer(
+        return Answer.from_query(
             ctx.query,
             rcode=dns.rcode.NOERROR,
             rrsets=[rrset],
         )
-    return make_resolver_answer(ctx.query, rcode=dns.rcode.NOERROR)
+    return Answer.from_query(ctx.query, rcode=dns.rcode.NOERROR)

@@ -6,10 +6,9 @@ import unittest
 
 import dns.name
 import dns.rcode
-import dns.resolver
 import dns.rdatatype
 
-from core.answer import make_answer
+from core.answer import Answer
 from core.context import QueryContext
 from core.hooks import RequestHook, ResolverHook, ResponseHook
 from core.models import Query, ResolverResult
@@ -40,9 +39,9 @@ class _DummyResolver(Resolver):
     name = "dummy"
     tags = {"default"}
 
-    async def resolve(self, query: Query, timeout_s: float) -> dns.resolver.Answer:
+    async def resolve(self, query: Query, timeout_s: float) -> Answer:
         _ = query, timeout_s
-        return make_answer(query, rcode=dns.rcode.NOERROR)
+        return Answer.from_query(query, rcode=dns.rcode.NOERROR)
 
 
 class TestCoreStep1(unittest.IsolatedAsyncioTestCase):
@@ -54,7 +53,7 @@ class TestCoreStep1(unittest.IsolatedAsyncioTestCase):
         )
 
     def test_answer_defaults(self) -> None:
-        answer = make_answer(self.query, rcode=dns.rcode.NOERROR)
+        answer = Answer.from_query(self.query, rcode=dns.rcode.NOERROR)
         self.assertEqual(answer.response.rcode(), dns.rcode.NOERROR)
         self.assertEqual(answer.response.answer, [])
 

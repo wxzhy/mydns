@@ -6,9 +6,8 @@ import socket
 
 import dns.asyncquery
 import dns.inet
-import dns.resolver
 
-from core.answer import answer_from_response
+from core.answer import Answer
 from core.models import Query
 from resolver.resolver import Resolver, build_request_message
 from resolver.tricks import TrickyStreamSocket
@@ -32,7 +31,7 @@ class TcpUpstreamResolver(Resolver):
         self.use_tricks = use_tricks
         self.tags = tags or {"default"}
 
-    async def resolve(self, query: Query, timeout_s: float) -> dns.resolver.Answer:
+    async def resolve(self, query: Query, timeout_s: float) -> Answer:
         request = build_request_message(query, use_edns=True)
         kwargs: dict[str, object] = {
             "where": self.address,
@@ -48,7 +47,7 @@ class TcpUpstreamResolver(Resolver):
             request,
             **kwargs,
         )
-        return answer_from_response(
+        return Answer.from_response(
             query,
             response,
             nameserver=self.address,

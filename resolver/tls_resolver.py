@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import dns.asyncquery
-import dns.resolver
 
-from core.answer import answer_from_response
+from core.answer import Answer
 from core.models import Query
 from resolver.resolver import Resolver, build_request_message
 
@@ -30,7 +29,7 @@ class TlsUpstreamResolver(Resolver):
         self.verify = verify
         self.tags = tags or {"default"}
 
-    async def resolve(self, query: Query, timeout_s: float) -> dns.resolver.Answer:
+    async def resolve(self, query: Query, timeout_s: float) -> Answer:
         request = build_request_message(query, use_edns=True)
         response = await dns.asyncquery.tls(
             request,
@@ -40,7 +39,7 @@ class TlsUpstreamResolver(Resolver):
             server_hostname=self.server_hostname,
             verify=self.verify,
         )
-        return answer_from_response(
+        return Answer.from_response(
             query,
             response,
             nameserver=self.address,

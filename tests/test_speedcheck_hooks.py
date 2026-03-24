@@ -9,11 +9,10 @@ import unittest
 import dns.message
 import dns.name
 import dns.rcode
-import dns.resolver
 import dns.rdatatype
 import dns.rrset
 
-from core.answer import make_answer
+from core.answer import Answer, make_answer
 from core.context import QueryContext
 from core.models import Query, ResolverResult
 from plugins.speedcheck import RewriteAnswerByRTTHook, SpeedCheckResolverHook
@@ -29,9 +28,13 @@ def _make_ctx(qtype: dns.rdatatype.RdataType) -> QueryContext:
     )
 
 
-def _make_a_answer(*ips: str) -> dns.resolver.Answer:
+def _make_a_answer(*ips: str) -> Answer:
     rr = dns.rrset.from_text("www.example.com.", 30, "IN", "A", *ips)
-    return make_answer(_make_ctx(dns.rdatatype.A).query, rcode=dns.rcode.NOERROR, rrsets=[rr])
+    return Answer.from_query(
+        _make_ctx(dns.rdatatype.A).query,
+        rcode=dns.rcode.NOERROR,
+        rrsets=[rr],
+    )
 
 
 class TestSpeedcheckHooks(unittest.IsolatedAsyncioTestCase):
@@ -65,7 +68,7 @@ class TestSpeedcheckHooks(unittest.IsolatedAsyncioTestCase):
             "edge.example.com.",
         )
         a_rr = dns.rrset.from_text("edge.example.com.", 30, "IN", "A", "9.9.9.9", "8.8.8.8")
-        ctx.final_answer = make_answer(
+        ctx.final_answer = Answer.from_query(
             ctx.query,
             rcode=dns.rcode.NOERROR,
             rrsets=[cname, a_rr],
@@ -89,7 +92,7 @@ class TestSpeedcheckHooks(unittest.IsolatedAsyncioTestCase):
         hook = RewriteAnswerByRTTHook(max_return_ips=2)
         ctx = _make_ctx(dns.rdatatype.TXT)
         txt = dns.rrset.from_text("www.example.com.", 30, "IN", "TXT", "\"hello\"")
-        ctx.final_answer = make_answer(
+        ctx.final_answer = Answer.from_query(
             ctx.query,
             rcode=dns.rcode.NOERROR,
             rrsets=[txt],
@@ -107,7 +110,7 @@ class TestSpeedcheckHooks(unittest.IsolatedAsyncioTestCase):
         ctx.candidates = [
             ResolverResult(
                 resolver_name="slow",
-                answer=make_answer(
+                answer=Answer.from_query(
                     ctx.query,
                     rcode=dns.rcode.NOERROR,
                     rrsets=[txt_slow],
@@ -116,7 +119,7 @@ class TestSpeedcheckHooks(unittest.IsolatedAsyncioTestCase):
             ),
             ResolverResult(
                 resolver_name="fast",
-                answer=make_answer(
+                answer=Answer.from_query(
                     ctx.query,
                     rcode=dns.rcode.NOERROR,
                     rrsets=[txt_fast],
@@ -141,7 +144,7 @@ class TestSpeedcheckHooks(unittest.IsolatedAsyncioTestCase):
             "CNAME",
             "edge.example.com.",
         )
-        ctx.final_answer = make_answer(
+        ctx.final_answer = Answer.from_query(
             ctx.query,
             rcode=dns.rcode.NOERROR,
             rrsets=[cname],

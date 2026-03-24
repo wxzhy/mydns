@@ -9,9 +9,8 @@ import dns.exception
 import dns.flags
 import dns.message
 import dns.rcode
-import dns.resolver
 
-from core.answer import make_answer
+from core.answer import Answer, make_answer
 from core.context import QueryContext
 from core.models import Query
 
@@ -39,13 +38,12 @@ def parse_query_context(
     return ctx
 
 
-def build_response_wire(ctx: QueryContext, answer: dns.resolver.Answer) -> bytes:
+def build_response_wire(ctx: QueryContext, answer: Answer) -> bytes:
     """将抽象响应转换为 DNS wire。"""
     request: dns.message.Message = _require_state_value(ctx.state, "request_message")
     if ctx.query.message is None:
         ctx.query.message = request
     response = make_answer(ctx.query, answer)
-    assert isinstance(response, dns.message.Message)
     return response.to_wire()
 
 

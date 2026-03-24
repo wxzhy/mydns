@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import dns.rcode
-import dns.resolver
 
-from core.answer import make_resolver_answer
+from core.answer import Answer
 from core.context import QueryContext
 from core.hooks import RequestHook, ResolverHook, ResponseHook
 from logger import get_logger
@@ -37,7 +36,7 @@ class Pipeline:
         )
         self.upstream_timeout_s = upstream_timeout_s
 
-    async def process(self, ctx: QueryContext) -> dns.resolver.Answer:
+    async def process(self, ctx: QueryContext) -> Answer:
         """执行完整流水线并返回最终响应。"""
         logger.debug(
             "处理请求 qname=%s qtype=%s client=%s tags=%s",
@@ -78,7 +77,7 @@ class Pipeline:
         for hook in self.response_hooks:
             await hook.on_response(ctx)
 
-    def _fallback_answer(self, ctx: QueryContext) -> dns.resolver.Answer:
+    def _fallback_answer(self, ctx: QueryContext) -> Answer:
         logger.debug(
             "响应阶段未生成最终答案，返回SERVFAIL qname=%s qtype=%s candidates=%s",
             ctx.query.qname.to_text(),
@@ -95,4 +94,4 @@ class Pipeline:
                 for item in ctx.candidates
             ],
         )
-        return make_resolver_answer(ctx.query, rcode=dns.rcode.SERVFAIL)
+        return Answer.from_query(ctx.query, rcode=dns.rcode.SERVFAIL)

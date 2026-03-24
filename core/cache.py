@@ -11,6 +11,7 @@ import dns.rdataclass
 import dns.rdatatype
 import dns.resolver
 
+from core.answer import Answer
 from core.models import Query
 
 
@@ -36,7 +37,7 @@ class AnswerLRUCache(dns.resolver.LRUCache):
         # 缓存内部只保存副本，避免调用方后续修改污染缓存。
         super().put(key, self._clone_answer(value))
 
-    def get(self, key: CacheKey) -> dns.resolver.Answer | None:
+    def get(self, key: CacheKey) -> Answer | None:
         cached = super().get(key)
         if cached is None:
             return None
@@ -53,35 +54,24 @@ class AnswerLRUCache(dns.resolver.LRUCache):
         *,
         ttl_s: int,
         preserve_expiration: float | None = None,
-    ) -> dns.resolver.Answer:
+    ) -> Answer:
         """返回一个新 Answer，并把 answer section 内 RRSet 的 TTL 改为指定值。"""
         ttl = max(0, int(ttl_s))
         cloned = self._clone_answer(answer)
-        for rrset in cloned.response.answer:
+        response = cloned.to_message()
+        for rrset in response.answer:
             rrset.ttl = ttl
-        cloned.response.index = None
-        rebuilt = dns.resolver.Answer(
+        response.index = None
+        return Answer(
             cloned.qname,
             cloned.rdtype,
             cloned.rdclass,
-            cloned.response,
+            response,
             nameserver=cloned.nameserver,
             port=cloned.port,
+            expiration=preserve_expiration,
         )
-        if preserve_expiration is not None:
-            rebuilt.expiration = preserve_expiration
-        return rebuilt
 
     @staticmethod
-    def _clone_answer(answer: dns.resolver.Answer) -> dns.resolver.Answer:
-        response_copy = dns.message.from_wire(answer.response.to_wire())
-        cloned = dns.resolver.Answer(
-            answer.qname,
-            answer.rdtype,
-            answer.rdclass,
-            response_copy,
-            nameserver=answer.nameserver,
-            port=answer.port,
-        )
-        cloned.expiration = answer.expiration
-        return cloned
+    def _clone_answer(answer: dns.resolver.Answer) -> Answer:
+        return Answer.from_answer(answer)

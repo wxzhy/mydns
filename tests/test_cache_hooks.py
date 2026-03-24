@@ -8,10 +8,9 @@ import unittest
 import dns.name
 import dns.rcode
 import dns.rdatatype
-import dns.resolver
 import dns.rrset
 
-from core.answer import make_answer
+from core.answer import Answer
 from core.cache import AnswerLRUCache, build_cache_key
 from core.context import QueryContext
 from core.models import Query
@@ -39,13 +38,13 @@ class _CountingResolver(Resolver):
         self.calls = 0
         self.rcode = rcode
 
-    async def resolve(self, query: Query, timeout_s: float) -> dns.resolver.Answer:
+    async def resolve(self, query: Query, timeout_s: float) -> Answer:
         _ = timeout_s
         self.calls += 1
         rrsets: list[dns.rrset.RRset] | None = None
         if self.rcode == dns.rcode.NOERROR and query.qtype == dns.rdatatype.A:
             rrsets = [dns.rrset.from_text(query.qname.to_text(), 30, "IN", "A", "1.1.1.1")]
-        return make_answer(query, rcode=self.rcode, rrsets=rrsets)
+        return Answer.from_query(query, rcode=self.rcode, rrsets=rrsets)
 
 
 class TestAnswerLRUCache(unittest.TestCase):
@@ -53,7 +52,7 @@ class TestAnswerLRUCache(unittest.TestCase):
         cache = AnswerLRUCache(max_size=8)
         query = _make_query()
         rrset = dns.rrset.from_text("www.example.com.", 30, "IN", "A", "1.1.1.1")
-        answer = make_answer(query, rcode=dns.rcode.NOERROR, rrsets=[rrset])
+        answer = Answer.from_query(query, rcode=dns.rcode.NOERROR, rrsets=[rrset])
         key = build_cache_key(query)
 
         cache.put(key, answer)

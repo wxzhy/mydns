@@ -6,10 +6,9 @@ import unittest
 
 import dns.name
 import dns.rcode
-import dns.resolver
 import dns.rdatatype
 
-from core.answer import make_answer
+from core.answer import Answer
 from core.context import QueryContext
 from core.hooks import RequestHook, ResponseHook
 from core.models import Query
@@ -26,7 +25,7 @@ class _TrackRequestHook(RequestHook):
     async def on_request(self, ctx: QueryContext) -> None:
         self.events.append("request")
         if self.stop:
-            ctx.final_answer = make_answer(ctx.query, rcode=dns.rcode.NXDOMAIN)
+            ctx.final_answer = Answer.from_query(ctx.query, rcode=dns.rcode.NXDOMAIN)
             ctx.stop = True
 
 
@@ -40,13 +39,13 @@ class _TrackResponseHook(ResponseHook):
 
 
 class _TrackResolver(Resolver):
-    def __init__(self, events: list[str], answer: dns.resolver.Answer) -> None:
+    def __init__(self, events: list[str], answer: Answer) -> None:
         self.name = "track"
         self.tags = {"default"}
         self.events = events
         self.answer = answer
 
-    async def resolve(self, query: Query, timeout_s: float) -> dns.resolver.Answer:
+    async def resolve(self, query: Query, timeout_s: float) -> Answer:
         _ = query, timeout_s
         self.events.append("upstream")
         return self.answer
@@ -58,7 +57,7 @@ class _FailIfCalledResolver(Resolver):
 
     async def resolve(
         self, query: Query, timeout_s: float
-    ) -> dns.resolver.Answer:  # pragma: no cover
+    ) -> Answer:  # pragma: no cover
         _ = query, timeout_s
         raise AssertionError("短路后不应再访问上游")
 
@@ -75,7 +74,7 @@ class TestPipelineStep2(unittest.IsolatedAsyncioTestCase):
     async def test_pipeline_order(self) -> None:
         events: list[str] = []
         pipeline = Pipeline(
-            resolvers=[_TrackResolver(events, make_answer(self.ctx.query, rcode=dns.rcode.NOERROR))],
+            resolvers=[_TrackResolver(events, Answer.from_query(self.ctx.query, rcode=dns.rcode.NOERROR))],
             request_hooks=[_TrackRequestHook(events)],
             response_hooks=[RewriteAnswerByRTTHook(), _TrackResponseHook(events)],
         )
