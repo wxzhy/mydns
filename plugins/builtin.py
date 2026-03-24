@@ -36,3 +36,4 @@ class NoopResponseHook(ResponseHook):
 
     async def on_response(self, ctx: QueryContext) -> None:
         _ = ctx
+        logger.debug("响应: %s", ctx.final_answer)

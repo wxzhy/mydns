@@ -10,15 +10,24 @@ pipeline:
 # tag: txt路径 或 txt路径列表
 domainset:
   cn:
-    - rules/domainset.cn.txt
-
+    - rules/geosite/cn.list
+  ads:
+    - rules/geosite/category-ads-all.list
+  gfw:
+    - rules/geosite/gfw.list
+  private:
+    - rules/geosite/private.list
 # 可选：domainset 缓存文件。存在时优先加载；不存在则初始化后自动写入。
 domainset_cache_file: cache/domainset.cache
 
 # tag: txt路径 或 txt路径列表
 ipset:
   cn:
-    - rules/ipset.cn.txt
+    - rules/geoip/cn.list
+  private:
+    - rules/geoip/private.list
+  telegram:
+    - rules/geoip/telegram.list
 
 resolvers:
   # 已移除冗余参数：source/source_port/http_version/ssl_context/family/post
@@ -50,6 +59,12 @@ resolvers:
     port: 53
     use_tricks: false
     tags: [default]
+  - name: google-tcp
+    type: tcp
+    address: 8.8.8.8
+    port: 53
+    use_tricks: true
+    tags: [default, gfw]
   - name: dns-google-tls
     type: tls
     address: 8.8.8.8
@@ -71,7 +86,8 @@ resolvers:
     type: udp
     address: 8.8.8.8
     port: 53
-    tags: [default]
+    tags: [default, gfw]
+    use_tricks: true
 
 hooks:
   request:
@@ -82,6 +98,16 @@ hooks:
     - plugins.builtin.NoopRequestHook
   resolver:
     - plugins.builtin.NoopResolverHook
+    # 按上游返回 IP 命中的 ipset tag 改写结果；必须放在测速前。
+    - class: plugins.tagset.RewriteByIPTagResolverHook
+      kwargs:
+        replacements:
+          telegram:
+            A: 203.0.113.10
+            AAAA: 2001:db8::10
+          private:
+            A: 127.0.0.1
+            AAAA: ::1
     - class: plugins.speedcheck.SpeedCheckResolverHook
       kwargs:
         timeout_s: 0.8

@@ -7,7 +7,10 @@ import dns.edns
 import dns.message
 import dns.name
 import dns.rdatatype
-from core.answer import Answer
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from core.answer import Answer
 
 
 @dataclass(slots=True)

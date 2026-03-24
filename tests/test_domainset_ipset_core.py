@@ -9,12 +9,15 @@ from pathlib import Path
 import dns.name
 import dns.rcode
 import dns.rdatatype
+import dns.rrset
 
+from core.answer import Answer
 from core.context import QueryContext
 from core.domainset import DomainSet, init_domainset
 from core.ipset import IPSet, init_ipset
-from core.models import Query
-from plugins.tagset import TagSetRequestHook
+from core.models import Query, ResolverResult
+from plugins.speedcheck import SpeedCheckResolverHook
+from plugins.tagset import RewriteByIPTagResolverHook, TagSetRequestHook
 
 
 class TestDomainSet(unittest.TestCase):
@@ -198,6 +201,158 @@ class TestTagSetHook(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(ctx.final_answer.response.answer, [])
         finally:
             init_domainset({})
+            init_ipset({})
+
+
+class TestTagSetResolverHook(unittest.IsolatedAsyncioTestCase):
+    async def test_rewrite_by_ip_tag_should_replace_a_answer(self) -> None:
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                base = Path(td)
+                (base / "telegram.txt").write_text("1.1.1.0/24\n", encoding="utf-8")
+                init_ipset({"telegram": ["telegram.txt"]}, base_dir=base)
+
+                hook = RewriteByIPTagResolverHook(
+                    replacements={"telegram": {"A": "203.0.113.10"}}
+                )
+                ctx = QueryContext(
+                    query=Query(
+                        client_addr=("127.0.0.1", 5335),
+                        qname=dns.name.from_text("www.example.com."),
+                        qtype=dns.rdatatype.A,
+                    )
+                )
+                rrset = dns.rrset.from_text(
+                    "www.example.com.",
+                    60,
+                    "IN",
+                    "A",
+                    "1.1.1.1",
+                    "8.8.8.8",
+                )
+                result = ResolverResult(
+                    resolver_name="upstream",
+                    answer=Answer.from_query(
+                        ctx.query,
+                        rcode=dns.rcode.NOERROR,
+                        rrsets=[rrset],
+                    ),
+                    elapsed_ms=1.0,
+                    error=None,
+                )
+
+            rewritten = await hook.on_resolver_result(ctx, result)
+
+            assert rewritten is not None
+            assert rewritten.answer is not None
+            self.assertEqual(
+                [rdata.to_text() for rdata in rewritten.answer.rrset],
+                ["203.0.113.10", "8.8.8.8"],
+            )
+            self.assertEqual(rewritten.answer.rrset.ttl, 60)
+        finally:
+            init_ipset({})
+
+    async def test_rewrite_by_ip_tag_should_replace_aaaa_answer(self) -> None:
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                base = Path(td)
+                (base / "private6.txt").write_text("fd00::/8\n", encoding="utf-8")
+                init_ipset({"private": ["private6.txt"]}, base_dir=base)
+
+                hook = RewriteByIPTagResolverHook(
+                    replacements={"private": {"AAAA": "2001:db8::10"}}
+                )
+                ctx = QueryContext(
+                    query=Query(
+                        client_addr=("127.0.0.1", 5335),
+                        qname=dns.name.from_text("ipv6.example.com."),
+                        qtype=dns.rdatatype.AAAA,
+                    )
+                )
+                rrset = dns.rrset.from_text(
+                    "ipv6.example.com.",
+                    120,
+                    "IN",
+                    "AAAA",
+                    "fd00::1",
+                )
+                result = ResolverResult(
+                    resolver_name="upstream",
+                    answer=Answer.from_query(
+                        ctx.query,
+                        rcode=dns.rcode.NOERROR,
+                        rrsets=[rrset],
+                    ),
+                    elapsed_ms=1.0,
+                    error=None,
+                )
+
+            rewritten = await hook.on_resolver_result(ctx, result)
+
+            assert rewritten is not None
+            assert rewritten.answer is not None
+            self.assertEqual(
+                [rdata.to_text() for rdata in rewritten.answer.rrset],
+                ["2001:db8::10"],
+            )
+            self.assertEqual(rewritten.answer.rrset.ttl, 120)
+        finally:
+            init_ipset({})
+
+    async def test_rewrite_by_ip_tag_should_run_before_speedcheck(self) -> None:
+        captured: list[list[str]] = []
+
+        async def fake_probe(
+            ips: list[str],
+            timeout_s: float,
+        ) -> dict[str, float | None]:
+            _ = timeout_s
+            captured.append(list(ips))
+            return {ip: 1.0 for ip in ips}
+
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                base = Path(td)
+                (base / "telegram.txt").write_text("1.1.1.0/24\n", encoding="utf-8")
+                init_ipset({"telegram": ["telegram.txt"]}, base_dir=base)
+
+                rewrite_hook = RewriteByIPTagResolverHook(
+                    replacements={"telegram": {"A": "203.0.113.20"}}
+                )
+                speedcheck_hook = SpeedCheckResolverHook(probe_func=fake_probe)
+                ctx = QueryContext(
+                    query=Query(
+                        client_addr=("127.0.0.1", 5335),
+                        qname=dns.name.from_text("www.example.com."),
+                        qtype=dns.rdatatype.A,
+                    )
+                )
+                rrset = dns.rrset.from_text(
+                    "www.example.com.",
+                    60,
+                    "IN",
+                    "A",
+                    "1.1.1.1",
+                )
+                result = ResolverResult(
+                    resolver_name="upstream",
+                    answer=Answer.from_query(
+                        ctx.query,
+                        rcode=dns.rcode.NOERROR,
+                        rrsets=[rrset],
+                    ),
+                    elapsed_ms=1.0,
+                    error=None,
+                )
+
+            result = await rewrite_hook.on_resolver_result(ctx, result)
+            assert result is not None
+            await speedcheck_hook.on_resolver_result(ctx, result)
+
+            self.assertEqual(captured, [["203.0.113.20"]])
+            self.assertEqual(ctx.ip_list.ips, {"203.0.113.20"})
+        finally:
             init_ipset({})
 
 

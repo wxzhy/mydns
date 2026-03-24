@@ -15,7 +15,7 @@ from core.hooks import RequestHook, ResolverHook, ResponseHook
 from core.ipset import init_ipset, ipset
 from core.pipeline import Pipeline
 from plugins.builtin import NoopRequestHook, NoopResolverHook, NoopResponseHook
-from plugins.tagset import TagSetRequestHook
+from plugins.tagset import RewriteByIPTagResolverHook, TagSetRequestHook
 from plugins.speedcheck import RewriteAnswerByRTTHook, SpeedCheckResolverHook
 from resolver.resolver import Resolver
 
@@ -105,6 +105,7 @@ def build_runtime_config(
         expected_base=ResolverHook,
         default_factory=_default_resolver_hooks,
     )
+    _validate_resolver_hook_order(resolver_hooks)
     response_hooks = _build_hooks(
         hooks_section.get("response"),
         stage="response",
@@ -342,6 +343,21 @@ def _default_request_hooks() -> list[RequestHook]:
 
 def _default_resolver_hooks() -> list[ResolverHook]:
     return [NoopResolverHook(), SpeedCheckResolverHook()]
+
+
+def _validate_resolver_hook_order(hooks: list[ResolverHook]) -> None:
+    speedcheck_indexes = [
+        index for index, hook in enumerate(hooks) if isinstance(hook, SpeedCheckResolverHook)
+    ]
+    if not speedcheck_indexes:
+        return
+    first_speedcheck = min(speedcheck_indexes)
+    for index, hook in enumerate(hooks):
+        if isinstance(hook, RewriteByIPTagResolverHook) and index > first_speedcheck:
+            raise ValueError(
+                "plugins.tagset.RewriteByIPTagResolverHook 必须位于 "
+                "plugins.speedcheck.SpeedCheckResolverHook 之前"
+            )
 
 
 def _default_response_hooks() -> list[ResponseHook]:

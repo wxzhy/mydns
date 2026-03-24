@@ -11,6 +11,7 @@ from pathlib import Path
 from config import build_runtime_config, load_runtime_config
 from core.domainset import domainset
 from plugins.builtin import NoopRequestHook
+from plugins.tagset import RewriteByIPTagResolverHook
 from plugins.tagset import TagSetRequestHook
 from plugins.speedcheck import SpeedCheckResolverHook
 from resolver.quic_resolver import QuicUpstreamResolver
@@ -140,6 +141,50 @@ class TestConfig(unittest.TestCase):
             hook = runtime.pipeline.request_hooks[0]
             self.assertIn("cn", hook.domainset_by_tag)
             self.assertIn("office", hook.ipset_by_tag)
+
+    def test_rewrite_ip_tag_hook_should_load_before_speedcheck(self) -> None:
+        content = """
+        hooks:
+          resolver:
+            - class: plugins.tagset.RewriteByIPTagResolverHook
+              kwargs:
+                replacements:
+                  telegram:
+                    A: 203.0.113.10
+            - class: plugins.speedcheck.SpeedCheckResolverHook
+        """
+        runtime = load_runtime_config(self._write_temp_yaml(content))
+
+        self.assertIsInstance(
+            runtime.pipeline.resolver_manager.resolver_hooks[0],
+            RewriteByIPTagResolverHook,
+        )
+        self.assertIsInstance(
+            runtime.pipeline.resolver_manager.resolver_hooks[1],
+            SpeedCheckResolverHook,
+        )
+
+    def test_rewrite_ip_tag_hook_after_speedcheck_should_raise(self) -> None:
+        raw = {
+            "hooks": {
+                "resolver": [
+                    "plugins.speedcheck.SpeedCheckResolverHook",
+                    {
+                        "class": "plugins.tagset.RewriteByIPTagResolverHook",
+                        "kwargs": {
+                            "replacements": {
+                                "telegram": {
+                                    "A": "203.0.113.10",
+                                }
+                            }
+                        },
+                    },
+                ]
+            }
+        }
+
+        with self.assertRaises(ValueError):
+            build_runtime_config(raw)
 
     def test_domainset_cache_file_should_prefer_cache(self) -> None:
         with tempfile.TemporaryDirectory(prefix="mydns-domainset-cache-") as td:
