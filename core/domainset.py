@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import marisa_trie
@@ -33,13 +34,13 @@ class DomainSet:
             self._records[key] = tag
         self._tree_ready = False
 
-    def load_from_files(self, filepaths: list[str | Path], tag: str) -> None:
+    def load_from_files(self, filepaths: Sequence[str | Path], tag: str) -> None:
         for filepath in filepaths:
             self.load_from_file(filepath, tag)
 
     def load_from_mapping(
         self,
-        mapping: dict[str, list[str | Path]],
+        mapping: Mapping[str, Sequence[str | Path]],
         *,
         base_dir: Path | None = None,
     ) -> None:
@@ -83,7 +84,7 @@ class DomainSet:
 
     def init(
         self,
-        mapping: dict[str, list[str | Path]] | None,
+        mapping: Mapping[str, Sequence[str | Path]] | None,
         *,
         base_dir: Path | None = None,
         cache_file: str | Path | None = None,
@@ -125,7 +126,7 @@ domainset = DomainSet()
 
 
 def init_domainset(
-    mapping: dict[str, list[str | Path]] | None,
+    mapping: Mapping[str, Sequence[str | Path]] | None,
     *,
     base_dir: Path | None = None,
     cache_file: str | Path | None = None,

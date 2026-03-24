@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from ipaddress import ip_address, ip_network
 from pathlib import Path
 
@@ -24,19 +25,20 @@ class IPSet:
                     continue
                 try:
                     rnode = self._tree.add(_normalize_cidr(value))
+                    assert rnode.data is not None
                     rnode.data["data"] = tag
                 except Exception as exc:
                     raise ValueError(
                         f"ipset 规则非法 file={path} line={line_no}: {exc}"
                     ) from exc
 
-    def load_from_files(self, filepaths: list[str | Path], tag: str) -> None:
+    def load_from_files(self, filepaths: Sequence[str | Path], tag: str) -> None:
         for filepath in filepaths:
             self.load_from_file(filepath, tag)
 
     def load_from_mapping(
         self,
-        mapping: dict[str, list[str | Path]],
+        mapping: Mapping[str, Sequence[str | Path]],
         *,
         base_dir: Path | None = None,
     ) -> None:
@@ -87,7 +89,7 @@ class IPSet:
 
     def init(
         self,
-        mapping: dict[str, list[str | Path]] | None,
+        mapping: Mapping[str, Sequence[str | Path]] | None,
         *,
         base_dir: Path | None = None,
     ) -> None:
@@ -100,7 +102,7 @@ ipset = IPSet()
 
 
 def init_ipset(
-    mapping: dict[str, list[str | Path]] | None,
+    mapping: Mapping[str, Sequence[str | Path]] | None,
     *,
     base_dir: Path | None = None,
 ) -> IPSet:

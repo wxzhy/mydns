@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 
 import dns.name
+import dns.rcode
 import dns.rdatatype
 
 from core.context import QueryContext
@@ -98,6 +99,103 @@ class TestTagSetHook(unittest.IsolatedAsyncioTestCase):
 
             await hook.on_request(ctx)
             self.assertEqual(ctx.tags, {"cn", "office"})
+        finally:
+            init_domainset({})
+            init_ipset({})
+
+    async def test_tagset_hook_should_block_ads_a_query(self) -> None:
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                base = Path(td)
+                (base / "ads.txt").write_text("ads.example.com\n", encoding="utf-8")
+                init_domainset({"ads": ["ads.txt"]}, base_dir=base)
+                init_ipset({})
+
+                hook = TagSetRequestHook()
+                ctx = QueryContext(
+                    query=Query(
+                        client_addr=("127.0.0.1", 5335),
+                        qname=dns.name.from_text("ads.example.com."),
+                        qtype=dns.rdatatype.A,
+                    )
+                )
+
+            await hook.on_request(ctx)
+
+            self.assertTrue(ctx.stop)
+            self.assertEqual(ctx.tags, {"ads"})
+            self.assertIsNotNone(ctx.final_answer)
+            assert ctx.final_answer is not None
+            self.assertEqual(ctx.final_answer.response.rcode(), dns.rcode.NOERROR)
+            self.assertEqual(len(ctx.final_answer.response.answer), 1)
+            rrset = ctx.final_answer.response.answer[0]
+            self.assertEqual(rrset.rdtype, dns.rdatatype.A)
+            self.assertEqual(rrset.ttl, 86400)
+            self.assertEqual(rrset[0].to_text(), "127.0.0.1")
+        finally:
+            init_domainset({})
+            init_ipset({})
+
+    async def test_tagset_hook_should_block_ads_aaaa_query(self) -> None:
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                base = Path(td)
+                (base / "ads.txt").write_text("ads.example.com\n", encoding="utf-8")
+                init_domainset({"ads": ["ads.txt"]}, base_dir=base)
+                init_ipset({})
+
+                hook = TagSetRequestHook()
+                ctx = QueryContext(
+                    query=Query(
+                        client_addr=("127.0.0.1", 5335),
+                        qname=dns.name.from_text("ads.example.com."),
+                        qtype=dns.rdatatype.AAAA,
+                    )
+                )
+
+            await hook.on_request(ctx)
+
+            self.assertTrue(ctx.stop)
+            self.assertEqual(ctx.tags, {"ads"})
+            self.assertIsNotNone(ctx.final_answer)
+            assert ctx.final_answer is not None
+            self.assertEqual(ctx.final_answer.response.rcode(), dns.rcode.NOERROR)
+            self.assertEqual(len(ctx.final_answer.response.answer), 1)
+            rrset = ctx.final_answer.response.answer[0]
+            self.assertEqual(rrset.rdtype, dns.rdatatype.AAAA)
+            self.assertEqual(rrset.ttl, 86400)
+            self.assertEqual(rrset[0].to_text(), "::1")
+        finally:
+            init_domainset({})
+            init_ipset({})
+
+    async def test_tagset_hook_should_return_empty_noerror_for_ads_non_address_query(
+        self,
+    ) -> None:
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                base = Path(td)
+                (base / "ads.txt").write_text("ads.example.com\n", encoding="utf-8")
+                init_domainset({"ads": ["ads.txt"]}, base_dir=base)
+                init_ipset({})
+
+                hook = TagSetRequestHook()
+                ctx = QueryContext(
+                    query=Query(
+                        client_addr=("127.0.0.1", 5335),
+                        qname=dns.name.from_text("ads.example.com."),
+                        qtype=dns.rdatatype.TXT,
+                    )
+                )
+
+            await hook.on_request(ctx)
+
+            self.assertTrue(ctx.stop)
+            self.assertEqual(ctx.tags, {"ads"})
+            self.assertIsNotNone(ctx.final_answer)
+            assert ctx.final_answer is not None
+            self.assertEqual(ctx.final_answer.response.rcode(), dns.rcode.NOERROR)
+            self.assertEqual(ctx.final_answer.response.answer, [])
         finally:
             init_domainset({})
             init_ipset({})

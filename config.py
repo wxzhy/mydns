@@ -296,8 +296,10 @@ def _build_tagset_hook(
     return TagSetRequestHook()
 
 
-def _normalize_tag_to_files(raw: dict[str, Any], *, key: str) -> dict[str, list[str]]:
-    output: dict[str, list[str]] = {}
+def _normalize_tag_to_files(
+    raw: dict[str, Any], *, key: str
+) -> dict[str, list[str | Path]]:
+    output: dict[str, list[str | Path]] = {}
     for raw_tag, raw_value in raw.items():
         if not isinstance(raw_tag, str) or not raw_tag.strip():
             raise ValueError(f"{key} 的 tag 必须是非空字符串")
@@ -307,14 +309,14 @@ def _normalize_tag_to_files(raw: dict[str, Any], *, key: str) -> dict[str, list[
     return output
 
 
-def _normalize_file_list(raw_value: Any, *, key: str) -> list[str]:
+def _normalize_file_list(raw_value: Any, *, key: str) -> list[str | Path]:
     if isinstance(raw_value, str):
         value = raw_value.strip()
         if not value:
             raise ValueError(f"{key} 路径不能为空")
         return [value]
     if isinstance(raw_value, (list, tuple)):
-        values: list[str] = []
+        values: list[str | Path] = []
         for index, item in enumerate(raw_value):
             if not isinstance(item, str) or not item.strip():
                 raise ValueError(f"{key}[{index}] 必须是非空字符串路径")

@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import dns.rcode
+import dns.rdatatype
+import dns.rrset
+
+from core.answer import make_resolver_answer
 from core.context import QueryContext
 from core.domainset import domainset
 from core.hooks import RequestHook
@@ -10,6 +15,11 @@ from logger import get_logger
 
 
 logger = get_logger("plugins.tagset")
+
+_ADS_TAG = "ads"
+_ADS_TTL_S = 24 * 60 * 60
+_ADS_A = "127.0.0.1"
+_ADS_AAAA = "::1"
 
 
 class TagSetRequestHook(RequestHook):
@@ -36,6 +46,17 @@ class TagSetRequestHook(RequestHook):
         # 一旦命中专用 tag，就替换默认 default tag。
         ctx.tags.discard("default")
         ctx.tags.update(matched_tags)
+        if _ADS_TAG in matched_tags:
+            ctx.final_answer = _build_ads_answer(ctx)
+            ctx.stop = True
+            logger.debug(
+                "广告标签命中并短路 qname=%s qtype=%s tags=%s",
+                qname_text,
+                ctx.query.qtype,
+                sorted(ctx.tags),
+            )
+            return
+
         logger.debug(
             "标签命中 qname=%s client=%s add=%s tags=%s",
             qname_text,
@@ -43,3 +64,33 @@ class TagSetRequestHook(RequestHook):
             sorted(matched_tags),
             sorted(ctx.tags),
         )
+
+
+def _build_ads_answer(ctx: QueryContext):
+    if ctx.query.qtype == dns.rdatatype.A:
+        rrset = dns.rrset.from_text(
+            ctx.query.qname.to_text(),
+            _ADS_TTL_S,
+            "IN",
+            "A",
+            _ADS_A,
+        )
+        return make_resolver_answer(
+            ctx.query,
+            rcode=dns.rcode.NOERROR,
+            rrsets=[rrset],
+        )
+    if ctx.query.qtype == dns.rdatatype.AAAA:
+        rrset = dns.rrset.from_text(
+            ctx.query.qname.to_text(),
+            _ADS_TTL_S,
+            "IN",
+            "AAAA",
+            _ADS_AAAA,
+        )
+        return make_resolver_answer(
+            ctx.query,
+            rcode=dns.rcode.NOERROR,
+            rrsets=[rrset],
+        )
+    return make_resolver_answer(ctx.query, rcode=dns.rcode.NOERROR)

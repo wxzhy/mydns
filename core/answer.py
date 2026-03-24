@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from typing import Any, cast
 
 import dns.message
 import dns.rcode
@@ -11,6 +12,11 @@ import dns.resolver
 import dns.rrset
 
 from core.models import Query
+
+
+def _invalidate_response_index(response: dns.message.Message) -> None:
+    # 直接修改 section 后，message 内部索引需要失效，避免 resolve_chaining() 查旧索引。
+    cast(Any, response).index = None
 
 
 def answer_from_response(
@@ -51,11 +57,10 @@ def make_resolver_answer(
     response.set_rcode(rcode)
     if rrsets is not None:
         response.answer.extend(rrsets)
-        # 直接修改 section 后，message 内部索引需要失效，避免 resolve_chaining() 查旧索引。
-        response.index = None
+        _invalidate_response_index(response)
     return answer_from_response(
         query,
-        response,
+        cast(dns.message.QueryMessage, response),
         nameserver=nameserver,
         port=port,
     )
@@ -101,5 +106,5 @@ def make_answer(
         response.answer.extend(answer.chaining_result.cnames)
     if answer.rrset is not None:
         response.answer.append(answer.rrset)
-    response.index = None
+    _invalidate_response_index(response)
     return response
