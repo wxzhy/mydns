@@ -16,6 +16,8 @@ from resolver.https_resolver import HttpsUpstreamResolver
 from resolver.quic_resolver import QuicUpstreamResolver
 from resolver.tcp_resolver import TcpUpstreamResolver
 from resolver.tls_resolver import TlsUpstreamResolver
+from resolver.tricks import TrickyDatagramSocket, TrickyStreamSocket
+from resolver.udp_resolver import UdpUpstreamResolver
 
 
 def _make_query(qtype: dns.rdatatype.RdataType = dns.rdatatype.A) -> Query:
@@ -57,6 +59,93 @@ class TestMultiResolversAndTricks(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(answer.response.answer), 1)
         self.assertEqual(captured["kwargs"]["where"], "1.1.1.1")
         self.assertEqual(captured["kwargs"]["port"], 53)
+
+    async def test_tcp_resolver_should_use_tricky_socket_when_enabled(self) -> None:
+        query = _make_query()
+        captured: dict[str, object] = {}
+        original_tcp = dns.asyncquery.tcp
+        original_connect = TrickyStreamSocket.connect
+
+        async def fake_tcp(
+            request: dns.message.Message, **kwargs: object
+        ) -> dns.message.Message:
+            captured["kwargs"] = kwargs
+            sock = kwargs.get("sock")
+            if sock is not None:
+                await sock.close()
+            return _build_response(request)
+
+        async def fake_connect(
+            self, address: tuple[str, int], timeout: float | None
+        ) -> None:
+            _ = (address, timeout)
+
+        dns.asyncquery.tcp = fake_tcp
+        TrickyStreamSocket.connect = fake_connect
+        try:
+            resolver = TcpUpstreamResolver(
+                name="tcp-tricky",
+                address="1.1.1.1",
+                use_tricks=True,
+            )
+            answer = await resolver.resolve(query, timeout_s=0.5)
+        finally:
+            dns.asyncquery.tcp = original_tcp
+            TrickyStreamSocket.connect = original_connect
+
+        self.assertEqual(answer.response.rcode(), dns.rcode.NOERROR)
+        self.assertIsInstance(captured["kwargs"]["sock"], TrickyStreamSocket)
+
+    async def test_udp_resolver_uses_asyncquery_udp(self) -> None:
+        query = _make_query()
+        captured: dict[str, object] = {}
+        original = dns.asyncquery.udp
+
+        async def fake_udp(
+            request: dns.message.Message, **kwargs: object
+        ) -> dns.message.Message:
+            captured["kwargs"] = kwargs
+            return _build_response(request)
+
+        dns.asyncquery.udp = fake_udp
+        try:
+            resolver = UdpUpstreamResolver(name="udp", address="1.1.1.1")
+            answer = await resolver.resolve(query, timeout_s=0.5)
+        finally:
+            dns.asyncquery.udp = original
+
+        self.assertEqual(answer.response.rcode(), dns.rcode.NOERROR)
+        self.assertEqual(len(answer.response.answer), 1)
+        self.assertEqual(captured["kwargs"]["where"], "1.1.1.1")
+        self.assertEqual(captured["kwargs"]["port"], 53)
+
+    async def test_udp_resolver_should_use_tricky_socket_when_enabled(self) -> None:
+        query = _make_query()
+        captured: dict[str, object] = {}
+        original = dns.asyncquery.udp
+
+        async def fake_udp(
+            request: dns.message.Message, **kwargs: object
+        ) -> dns.message.Message:
+            captured["kwargs"] = kwargs
+            sock = kwargs.get("sock")
+            if sock is not None:
+                await sock.close()
+            return _build_response(request)
+
+        dns.asyncquery.udp = fake_udp
+        try:
+            resolver = UdpUpstreamResolver(
+                name="udp-tricky",
+                address="1.1.1.1",
+                use_tricks=True,
+            )
+            answer = await resolver.resolve(query, timeout_s=0.5)
+        finally:
+            dns.asyncquery.udp = original
+
+        self.assertEqual(answer.response.rcode(), dns.rcode.NOERROR)
+        self.assertIsInstance(captured["kwargs"]["sock"], TrickyDatagramSocket)
 
     async def test_tls_resolver_uses_asyncquery_tls(self) -> None:
         query = _make_query()

@@ -22,10 +22,12 @@ ipset:
 
 resolvers:
   # 已移除冗余参数：source/source_port/http_version/ssl_context/family/post
+  # tcp/udp 可选 use_tricks: true，启用 tricks 中的自定义 socket
   - name: cloudflare
     type: udp
     address: 1.1.1.1
     port: 53
+    use_tricks: false
     tags: [default]
   - name: alidns
     type: udp
@@ -42,6 +44,12 @@ resolvers:
     address: 119.29.29.29
     port: 53
     tags: [default, cn]
+  - name: cloudflare-tcp
+    type: tcp
+    address: 1.1.1.1
+    port: 53
+    use_tricks: false
+    tags: [default]
   - name: dns-google-tls
     type: tls
     address: 8.8.8.8
