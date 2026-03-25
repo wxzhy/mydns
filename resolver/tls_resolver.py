@@ -41,6 +41,7 @@ class TlsUpstreamResolver(Resolver):
             timeout=timeout_s,
             server_hostname=self.server_hostname,
             verify=self.verify,
+            ignore_trailing=True,
         )
         return Answer.from_response(
             query,

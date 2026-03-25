@@ -81,7 +81,7 @@ resolvers:
     path: /dns-query
     bootstrap_address: 1.1.1.1
     ecs:
-      address: 2001:db8::
+      address: "2001:db8::"
       srclen: 48
     tags: [default]
   - name: dns-google-doq
@@ -111,10 +111,10 @@ hooks:
         replacements:
           telegram:
             A: 203.0.113.10
-            AAAA: 2001:db8::10
+            AAAA: "2001:db8::10"
           private:
             A: 127.0.0.1
-            AAAA: ::1
+            AAAA: "::1"
     - class: plugins.speedcheck.SpeedCheckResolverHook
       kwargs:
         timeout_s: 0.8

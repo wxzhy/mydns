@@ -42,10 +42,6 @@ class TagSetRequestHook(RequestHook):
         qname_text = ctx.query.qname.to_text().rstrip(".").lower()
         matched_tags = domainset.match_tags(qname_text)
 
-        if ctx.query.client_addr is not None:
-            client_ip = ctx.query.client_addr[0]
-            matched_tags.update(ipset.match_tags(client_ip))
-
         if not matched_tags:
             return
 

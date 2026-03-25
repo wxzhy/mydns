@@ -40,6 +40,7 @@ class TcpUpstreamResolver(Resolver):
             "where": self.address,
             "port": self.port,
             "timeout": timeout_s,
+            "ignore_trailing": True,
         }
         if self.use_tricks:
             af = dns.inet.af_for_address(self.address)

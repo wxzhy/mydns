@@ -57,6 +57,7 @@ class HttpsUpstreamResolver(Resolver):
             verify=self.verify,
             bootstrap_address=self.bootstrap_address,
             resolver=self.resolver,
+            ignore_trailing=True,
         )
         return Answer.from_response(
             query,

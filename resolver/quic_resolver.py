@@ -44,6 +44,7 @@ class QuicUpstreamResolver(Resolver):
             verify=self.verify,
             hostname=self.hostname,
             server_hostname=self.server_hostname,
+            ignore_trailing=True,
         )
         return Answer.from_response(
             query,
