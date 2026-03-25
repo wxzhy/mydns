@@ -127,6 +127,7 @@ class ResolverManager:
                 resolver.resolve(ctx.query, effective_timeout_s),
                 timeout=effective_timeout_s,
             )
+            answer.tags = set(ctx.tags)
             error: Exception | None = None
             logger.debug(
                 "收到上游响应 resolver=%s qname=%s qtype=%s rcode=%s rrset_count=%s",

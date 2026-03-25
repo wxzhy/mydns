@@ -100,4 +100,4 @@ class Pipeline:
                 for item in ctx.candidates
             ],
         )
-        return Answer.from_query(ctx.query, rcode=dns.rcode.SERVFAIL)
+        return Answer.from_query(ctx.query, rcode=dns.rcode.SERVFAIL, tags=ctx.tags)

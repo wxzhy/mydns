@@ -28,6 +28,7 @@ class Answer(dns.resolver.Answer):
         port: int | None = None,
         *,
         expiration: float | None = None,
+        tags: Iterable[str] | None = None,
     ) -> None:
         super().__init__(
             qname,
@@ -40,6 +41,7 @@ class Answer(dns.resolver.Answer):
         self._rcode = dns.rcode.Rcode(self.response.rcode())
         if expiration is not None:
             self.expiration = expiration
+        self.tags = set(tags or ())
 
     @property
     def rcode(self) -> dns.rcode.Rcode:
@@ -120,6 +122,7 @@ class Answer(dns.resolver.Answer):
             nameserver=answer.nameserver,
             port=answer.port,
             expiration=answer.expiration,
+            tags=getattr(answer, "tags", ()),
         )
         if hasattr(answer, "rcode"):
             cloned.rcode = dns.rcode.Rcode(getattr(answer, "rcode"))
@@ -133,6 +136,7 @@ class Answer(dns.resolver.Answer):
         *,
         nameserver: str | None = None,
         port: int | None = None,
+        tags: Iterable[str] | None = None,
     ) -> "Answer":
         return cls(
             query.qname,
@@ -141,6 +145,7 @@ class Answer(dns.resolver.Answer):
             response,
             nameserver=nameserver,
             port=port,
+            tags=tags,
         )
 
     @classmethod
@@ -152,6 +157,7 @@ class Answer(dns.resolver.Answer):
         rrsets: Iterable[dns.rrset.RRset] | None = None,
         nameserver: str | None = None,
         port: int | None = None,
+        tags: Iterable[str] | None = None,
     ) -> "Answer":
         request = cls._copy_request_message(query)
         response = dns.message.make_response(request)
@@ -166,6 +172,7 @@ class Answer(dns.resolver.Answer):
             cast(dns.message.QueryMessage, response),
             nameserver=nameserver,
             port=port,
+            tags=tags,
         )
 
     def clone(self) -> "Answer":

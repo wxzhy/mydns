@@ -90,6 +90,19 @@ class TestAnswerModel(unittest.TestCase):
         self.assertEqual(answer.rcode, dns.rcode.SERVFAIL)
         self.assertEqual(answer.response.rcode(), dns.rcode.SERVFAIL)
 
+    def test_from_answer_should_copy_tags(self) -> None:
+        answer = Answer.from_query(
+            _make_query(),
+            rcode=dns.rcode.NOERROR,
+            tags={"default", "ads"},
+        )
+
+        cloned = Answer.from_answer(answer)
+        answer.tags.add("cn")
+
+        self.assertEqual(cloned.tags, {"default", "ads"})
+        self.assertEqual(answer.tags, {"default", "ads", "cn"})
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -20,6 +20,7 @@ from plugins.cache import CacheHook
 from plugins.domain_rule import DomainRuleRequestHook
 from plugins.ip_rule import IPRuleResolverHook
 from plugins.speedcheck import RewriteAnswerByRTTHook, SpeedCheckResolverHook
+from plugins.tagset import TagSetResolverHook
 from resolver.resolver import Resolver
 
 
@@ -133,6 +134,9 @@ def build_runtime_config(
     ip_rule_hook = _build_ip_rule_hook(ip_rules_section)
     if ip_rule_hook is not None:
         resolver_hooks = _insert_ip_rule_hook(resolver_hooks, ip_rule_hook)
+    tagset_hook = _build_tagset_hook()
+    if tagset_hook is not None:
+        resolver_hooks = _insert_tagset_hook(resolver_hooks, tagset_hook)
 
     _validate_request_hook_order(request_hooks)
     _validate_resolver_hook_order(resolver_hooks)
@@ -391,6 +395,12 @@ def _build_ip_rule_hook(
     return IPRuleResolverHook(rules=raw_rules)
 
 
+def _build_tagset_hook() -> TagSetResolverHook | None:
+    if not domainset.tags:
+        return None
+    return TagSetResolverHook()
+
+
 def _normalize_tag_to_files(
     raw: dict[str, Any], *, key: str
 ) -> dict[str, list[str | Path]]:
@@ -465,6 +475,25 @@ def _insert_ip_rule_hook(
     return [*hooks, hook]
 
 
+def _insert_tagset_hook(
+    hooks: list[ResolverHook],
+    hook: TagSetResolverHook,
+) -> list[ResolverHook]:
+    if any(isinstance(existing, TagSetResolverHook) for existing in hooks):
+        return hooks
+    for index, existing in enumerate(hooks):
+        if isinstance(existing, SpeedCheckResolverHook):
+            return [*hooks[:index], hook, *hooks[index:]]
+
+    ip_rule_indexes = [
+        index for index, existing in enumerate(hooks) if isinstance(existing, IPRuleResolverHook)
+    ]
+    if ip_rule_indexes:
+        insert_at = max(ip_rule_indexes) + 1
+        return [*hooks[:insert_at], hook, *hooks[insert_at:]]
+    return [*hooks, hook]
+
+
 def _default_request_hooks() -> list[RequestHook]:
     return [NoopRequestHook()]
 
@@ -489,13 +518,29 @@ def _validate_request_hook_order(hooks: list[RequestHook]) -> None:
 
 
 def _validate_resolver_hook_order(hooks: list[ResolverHook]) -> None:
+    tagset_indexes = [
+        index for index, hook in enumerate(hooks) if isinstance(hook, TagSetResolverHook)
+    ]
     speedcheck_indexes = [
         index for index, hook in enumerate(hooks) if isinstance(hook, SpeedCheckResolverHook)
     ]
+    if tagset_indexes:
+        first_tagset = min(tagset_indexes)
+        for index, hook in enumerate(hooks):
+            if isinstance(hook, IPRuleResolverHook) and index > first_tagset:
+                raise ValueError(
+                    "plugins.ip_rule.IPRuleResolverHook 必须位于 "
+                    "plugins.tagset.TagSetResolverHook 之前"
+                )
     if not speedcheck_indexes:
         return
     first_speedcheck = min(speedcheck_indexes)
     for index, hook in enumerate(hooks):
+        if isinstance(hook, TagSetResolverHook) and index > first_speedcheck:
+            raise ValueError(
+                "plugins.tagset.TagSetResolverHook 必须位于 "
+                "plugins.speedcheck.SpeedCheckResolverHook 之前"
+            )
         if isinstance(hook, IPRuleResolverHook) and index > first_speedcheck:
             raise ValueError(
                 "plugins.ip_rule.IPRuleResolverHook 必须位于 "

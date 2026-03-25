@@ -25,6 +25,16 @@ def select_best_answer(ctx: QueryContext) -> Answer:
             ctx.query.qtype,
         )
         return Answer.from_query(ctx.query, rcode=dns.rcode.SERVFAIL)
+    tagged = _select_tagged_answer(candidates, tag="ads")
+    if tagged is not None:
+        logger.debug(
+            "基础结果选择命中ads qname=%s qtype=%s tags=%s rrset_count=%s",
+            ctx.query.qname.to_text(),
+            ctx.query.qtype,
+            sorted(tagged.tags),
+            len(tagged.response.answer),
+        )
+        return tagged
     selected = _select_fastest_normal(candidates)
     logger.debug(
         "基础结果选择完成 qname=%s qtype=%s selected_rcode=%s rrset_count=%s",
@@ -43,6 +53,20 @@ def _select_fastest_normal(candidates: list[ResolverResult]) -> Answer:
         if item.answer.response.rcode() == dns.rcode.NOERROR:
             return item.answer
     return ordered[0].answer
+
+
+def _select_tagged_answer(
+    candidates: list[ResolverResult],
+    *,
+    tag: str,
+) -> Answer | None:
+    for item in candidates:
+        answer = item.answer
+        if answer is None:
+            continue
+        if tag in answer.tags:
+            return answer
+    return None
 
 
 def _candidate_speed_key(item: ResolverResult) -> float:

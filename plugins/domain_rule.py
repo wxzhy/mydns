@@ -231,6 +231,7 @@ def _build_domain_rule_answer(
             ctx.query,
             rcode=dns.rcode.NOERROR,
             rrsets=[rrset],
+            tags=ctx.tags,
         )
     return None
 
@@ -244,7 +245,12 @@ def _build_intercept_answer(ctx: QueryContext, *, ttl_s: int) -> Answer:
             "A",
             _LOCALHOST_A,
         )
-        return Answer.from_query(ctx.query, rcode=dns.rcode.NOERROR, rrsets=[rrset])
+        return Answer.from_query(
+            ctx.query,
+            rcode=dns.rcode.NOERROR,
+            rrsets=[rrset],
+            tags=ctx.tags,
+        )
     if ctx.query.qtype == dns.rdatatype.AAAA:
         rrset = dns.rrset.from_text(
             ctx.query.qname.to_text(),
@@ -253,8 +259,13 @@ def _build_intercept_answer(ctx: QueryContext, *, ttl_s: int) -> Answer:
             "AAAA",
             _LOCALHOST_AAAA,
         )
-        return Answer.from_query(ctx.query, rcode=dns.rcode.NOERROR, rrsets=[rrset])
-    return Answer.from_query(ctx.query, rcode=dns.rcode.NOERROR)
+        return Answer.from_query(
+            ctx.query,
+            rcode=dns.rcode.NOERROR,
+            rrsets=[rrset],
+            tags=ctx.tags,
+        )
+    return Answer.from_query(ctx.query, rcode=dns.rcode.NOERROR, tags=ctx.tags)
 
 
 def _build_ip_rrset(

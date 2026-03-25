@@ -17,6 +17,7 @@ from plugins.cache import CacheHook
 from plugins.domain_rule import DomainRuleRequestHook
 from plugins.ip_rule import IPRuleResolverHook
 from plugins.speedcheck import SpeedCheckResolverHook
+from plugins.tagset import TagSetResolverHook
 from plugins.utils.speedcheck import configure_probe_cache, get_probe_cache_config
 from resolver.quic_resolver import QuicUpstreamResolver
 from resolver.udp_resolver import UdpUpstreamResolver
@@ -104,6 +105,50 @@ class TestConfig(unittest.TestCase):
         self.assertIsInstance(hook, SpeedCheckResolverHook)
         self.assertAlmostEqual(hook.timeout_s, 0.3)
         self.assertEqual(get_probe_cache_config(), (10000, 3600.0))
+
+    def test_tagset_hook_should_load_before_speedcheck(self) -> None:
+        content = """
+        domainset:
+          ads:
+            - ads.txt
+        hooks:
+          resolver:
+            - class: plugins.speedcheck.SpeedCheckResolverHook
+        """
+        with tempfile.TemporaryDirectory(prefix="mydns-tagset-order-") as td:
+            base = Path(td)
+            (base / "ads.txt").write_text("ads.example.com\n", encoding="utf-8")
+            path = base / "mydns.yaml"
+            path.write_text(textwrap.dedent(content), encoding="utf-8")
+            runtime = load_runtime_config(path)
+
+        self.assertIsInstance(
+            runtime.pipeline.resolver_manager.resolver_hooks[0],
+            TagSetResolverHook,
+        )
+        self.assertIsInstance(
+            runtime.pipeline.resolver_manager.resolver_hooks[1],
+            SpeedCheckResolverHook,
+        )
+
+    def test_tagset_hook_after_speedcheck_should_raise(self) -> None:
+        raw = {
+            "domainset": {
+                "ads": ["ads.txt"],
+            },
+            "hooks": {
+                "resolver": [
+                    "plugins.speedcheck.SpeedCheckResolverHook",
+                    "plugins.tagset.TagSetResolverHook",
+                ]
+            },
+        }
+
+        with tempfile.TemporaryDirectory(prefix="mydns-tagset-order-") as td:
+            base = Path(td)
+            (base / "ads.txt").write_text("ads.example.com\n", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                build_runtime_config(raw, base_dir=base)
 
     def test_resolver_timeout_and_ecs_should_load_from_config(self) -> None:
         raw = {

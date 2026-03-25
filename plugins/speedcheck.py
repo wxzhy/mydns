@@ -55,6 +55,14 @@ class SpeedCheckResolverHook(ResolverHook):
                 repr(result.error) if result.error else None,
             )
             return result
+        if "ads" in result.answer.tags:
+            logger.debug(
+                "测速跳过 resolver=%s qname=%s reason=ads_tagged tags=%s",
+                result.resolver_name,
+                qname_text,
+                sorted(result.answer.tags),
+            )
+            return result
         if ctx.query.qtype not in {dns.rdatatype.A, dns.rdatatype.AAAA}:
             logger.debug(
                 "测速跳过 resolver=%s qtype=%s reason=unsupported_qtype",
