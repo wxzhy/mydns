@@ -26,15 +26,19 @@ class _SleepResolver(Resolver):
         answer: Answer | None = None,
         error: Exception | None = None,
         tags: set[str] | None = None,
+        timeout: float | None = None,
     ) -> None:
         self.name = name
         self.delay_s = delay_s
         self.answer = answer
         self.error = error
         self.tags = tags or {"default"}
+        self.timeout = timeout
+        self.last_timeout_s: float | None = None
 
     async def resolve(self, query: Query, timeout_s: float) -> Answer:
-        _ = query, timeout_s
+        _ = query
+        self.last_timeout_s = timeout_s
         await asyncio.sleep(self.delay_s)
         if self.error is not None:
             raise self.error
@@ -157,6 +161,19 @@ class TestResolverManagerStep3(unittest.IsolatedAsyncioTestCase):
         self.assertLess(duration, 0.2)
         self.assertIn("fast", names)
         self.assertNotIn("cn-only", names)
+
+    async def test_resolver_specific_timeout_should_override_global_timeout(self) -> None:
+        slow = _SleepResolver("slow", delay_s=0.3, timeout=0.05)
+        manager = ResolverManager(resolvers=[slow])
+
+        start = time.perf_counter()
+        await manager.collect(self.ctx, timeout_s=0.4)
+        duration = time.perf_counter() - start
+
+        self.assertLess(duration, 0.15)
+        self.assertEqual(slow.last_timeout_s, 0.05)
+        self.assertEqual(len(self.ctx.candidates), 1)
+        self.assertIsNotNone(self.ctx.candidates[0].error)
 
     async def test_exception_isolation_and_hook_rewrite(self) -> None:
         manager = ResolverManager(

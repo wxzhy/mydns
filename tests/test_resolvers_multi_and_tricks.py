@@ -5,6 +5,7 @@ from __future__ import annotations
 import unittest
 
 import dns.asyncquery
+import dns.edns
 import dns.message
 import dns.name
 import dns.rcode
@@ -118,6 +119,78 @@ class TestMultiResolversAndTricks(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(answer.response.answer), 1)
         self.assertEqual(captured["kwargs"]["where"], "1.1.1.1")
         self.assertEqual(captured["kwargs"]["port"], 53)
+
+    async def test_udp_resolver_should_use_resolver_timeout_override(self) -> None:
+        query = _make_query()
+        captured: dict[str, object] = {}
+        original = dns.asyncquery.udp
+
+        async def fake_udp(
+            request: dns.message.Message, **kwargs: object
+        ) -> dns.message.Message:
+            captured["kwargs"] = kwargs
+            return _build_response(request)
+
+        dns.asyncquery.udp = fake_udp
+        try:
+            resolver = UdpUpstreamResolver(
+                name="udp-timeout",
+                address="1.1.1.1",
+                timeout=0.2,
+            )
+            await resolver.resolve(query, timeout_s=0.5)
+        finally:
+            dns.asyncquery.udp = original
+
+        self.assertEqual(captured["kwargs"]["timeout"], 0.2)
+
+    async def test_udp_resolver_should_override_or_add_ecs_option(self) -> None:
+        request = dns.message.make_query("www.example.com.", "A", use_edns=True)
+        original_ecs = dns.edns.ECSOption("198.51.100.12", 24)
+        other_option = dns.edns.GenericOption(dns.edns.NSID, b"nsid")
+        request.use_edns(options=[other_option, original_ecs])
+        query = Query(
+            client_addr=("127.0.0.1", 5335),
+            qname=dns.name.from_text("www.example.com."),
+            qtype=dns.rdatatype.A,
+            txid=request.id,
+            ecs=original_ecs,
+            message=request,
+        )
+        captured: dict[str, object] = {}
+        replacement_ecs = dns.edns.ECSOption("203.0.113.5", 20)
+        original = dns.asyncquery.udp
+
+        async def fake_udp(
+            request: dns.message.Message, **kwargs: object
+        ) -> dns.message.Message:
+            captured["request"] = request
+            return _build_response(request)
+
+        dns.asyncquery.udp = fake_udp
+        try:
+            resolver = UdpUpstreamResolver(
+                name="udp-ecs",
+                address="1.1.1.1",
+                ecs=replacement_ecs,
+            )
+            await resolver.resolve(query, timeout_s=0.5)
+        finally:
+            dns.asyncquery.udp = original
+
+        sent_request = captured["request"]
+        self.assertIsInstance(sent_request, dns.message.Message)
+        ecs_options = [
+            option
+            for option in sent_request.options
+            if isinstance(option, dns.edns.ECSOption)
+        ]
+        self.assertEqual(len(ecs_options), 1)
+        self.assertEqual(ecs_options[0].address, replacement_ecs.address)
+        self.assertEqual(ecs_options[0].srclen, replacement_ecs.srclen)
+        self.assertTrue(
+            any(option.otype == dns.edns.NSID for option in sent_request.options)
+        )
 
     async def test_udp_resolver_should_use_tricky_socket_when_enabled(self) -> None:
         query = _make_query()

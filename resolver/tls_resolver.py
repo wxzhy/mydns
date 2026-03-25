@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import dns.asyncquery
+import dns.edns
 
 from core.answer import Answer
 from core.models import Query
-from resolver.resolver import Resolver, build_request_message
+from resolver.resolver import Resolver
 
 
 class TlsUpstreamResolver(Resolver):
@@ -21,16 +22,18 @@ class TlsUpstreamResolver(Resolver):
         server_hostname: str | None = None,
         verify: bool | str = True,
         tags: set[str] | None = None,
+        timeout: float | None = None,
+        ecs: dns.edns.ECSOption | None = None,
     ) -> None:
-        self.name = name
+        super().__init__(name=name, tags=tags, timeout=timeout, ecs=ecs)
         self.address = address
         self.port = port
         self.server_hostname = server_hostname
         self.verify = verify
-        self.tags = tags or {"default"}
 
     async def resolve(self, query: Query, timeout_s: float) -> Answer:
-        request = build_request_message(query, use_edns=True)
+        timeout_s = self.effective_timeout(timeout_s)
+        request = self.build_request_message(query, use_edns=True)
         response = await dns.asyncquery.tls(
             request,
             where=self.address,

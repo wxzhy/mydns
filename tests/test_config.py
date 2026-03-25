@@ -8,6 +8,8 @@ import textwrap
 import unittest
 from pathlib import Path
 
+import dns.edns
+
 from config import build_runtime_config, load_runtime_config
 from core.domainset import domainset
 from plugins.builtin import NoopRequestHook
@@ -69,6 +71,41 @@ class TestConfig(unittest.TestCase):
         self.assertIsInstance(runtime.pipeline.resolver_manager.resolvers[1], QuicUpstreamResolver)
         self.assertIsInstance(runtime.pipeline.resolver_manager.resolver_hooks[0], SpeedCheckResolverHook)
         self.assertEqual(runtime.pipeline.response_hooks[0].max_return_ips, 1)
+
+    def test_resolver_timeout_and_ecs_should_load_from_config(self) -> None:
+        raw = {
+            "resolvers": [
+                {
+                    "type": "udp",
+                    "name": "cf",
+                    "address": "1.1.1.1",
+                    "timeout": 0.25,
+                    "ecs": "203.0.113.0/24",
+                },
+                {
+                    "type": "udp",
+                    "name": "v6",
+                    "address": "2001:4860:4860::8888",
+                    "ecs": {
+                        "address": "2001:db8::",
+                        "srclen": 48,
+                        "scopelen": 0,
+                    },
+                },
+            ]
+        }
+
+        runtime = build_runtime_config(raw)
+        resolver1 = runtime.pipeline.resolver_manager.resolvers[0]
+        resolver2 = runtime.pipeline.resolver_manager.resolvers[1]
+
+        self.assertAlmostEqual(resolver1.timeout, 0.25)
+        self.assertIsInstance(resolver1.ecs, dns.edns.ECSOption)
+        self.assertEqual(resolver1.ecs.address, "203.0.113.0")
+        self.assertEqual(resolver1.ecs.srclen, 24)
+        self.assertIsInstance(resolver2.ecs, dns.edns.ECSOption)
+        self.assertEqual(resolver2.ecs.address, "2001:db8::")
+        self.assertEqual(resolver2.ecs.srclen, 48)
 
     def test_unknown_resolver_type_should_raise(self) -> None:
         raw = {

@@ -32,10 +32,14 @@ ipset:
 resolvers:
   # 已移除冗余参数：source/source_port/http_version/ssl_context/family/post
   # tcp/udp 可选 use_tricks: true，启用 tricks 中的自定义 socket
+  # timeout: 当前 resolver 超时；省略时继承 pipeline.upstream_timeout_s
+  # ecs: 可选，支持 CIDR 字符串，或 {address, srclen, scopelen}
   - name: cloudflare
     type: udp
     address: 1.1.1.1
     port: 53
+    timeout: 1.2
+    ecs: 203.0.113.0/24
     use_tricks: false
     tags: [default]
   - name: alidns
@@ -76,6 +80,9 @@ resolvers:
     address: cloudflare-dns.com
     path: /dns-query
     bootstrap_address: 1.1.1.1
+    ecs:
+      address: 2001:db8::
+      srclen: 48
     tags: [default]
   - name: dns-google-doq
     type: quic

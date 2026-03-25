@@ -48,12 +48,13 @@ class ResolverManager:
             return
 
         for resolver in matched:
+            effective_timeout_s = resolver.effective_timeout(timeout_s)
             logger.debug(
                 "并发调度 resolver=%s qname=%s qtype=%s timeout=%.3fs",
                 resolver.name,
                 ctx.query.qname.to_text(),
                 ctx.query.qtype,
-                timeout_s,
+                effective_timeout_s,
             )
 
         tasks = [
@@ -113,16 +114,18 @@ class ResolverManager:
         timeout_s: float,
     ) -> ResolverResult:
         start = time.perf_counter()
+        effective_timeout_s = resolver.effective_timeout(timeout_s)
         logger.debug(
-            "上游请求开始 resolver=%s qname=%s qtype=%s",
+            "上游请求开始 resolver=%s qname=%s qtype=%s timeout=%.3fs",
             resolver.name,
             ctx.query.qname.to_text(),
             ctx.query.qtype,
+            effective_timeout_s,
         )
         try:
             answer = await asyncio.wait_for(
-                resolver.resolve(ctx.query, timeout_s),
-                timeout=timeout_s,
+                resolver.resolve(ctx.query, effective_timeout_s),
+                timeout=effective_timeout_s,
             )
             error: Exception | None = None
             logger.debug(

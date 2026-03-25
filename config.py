@@ -8,6 +8,7 @@ from pathlib import Path
 from collections.abc import Callable
 from typing import Any
 
+import dns.edns
 import yaml
 
 from core.domainset import domainset, init_domainset
@@ -175,6 +176,8 @@ def _build_resolver(raw: dict[str, Any], *, index: int) -> Resolver:
         )
 
     _normalize_tags(kwargs, key=f"resolvers[{index}].tags")
+    _normalize_resolver_timeout(kwargs, key=f"resolvers[{index}].timeout")
+    _normalize_resolver_ecs(kwargs, key=f"resolvers[{index}].ecs")
     try:
         return resolver_cls(**kwargs)
     except TypeError as exc:
@@ -259,6 +262,57 @@ def _validate_removed_resolver_options(
             raise ValueError(
                 f"resolvers[{index}].{option} 已移除，请从 {resolver_type} 配置中删除"
             )
+
+
+def _normalize_resolver_timeout(kwargs: dict[str, Any], *, key: str) -> None:
+    if "timeout" not in kwargs or kwargs["timeout"] is None:
+        return
+    try:
+        timeout = float(kwargs["timeout"])
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{key} 必须是正数") from exc
+    if timeout <= 0:
+        raise ValueError(f"{key} 必须是正数")
+    kwargs["timeout"] = timeout
+
+
+def _normalize_resolver_ecs(kwargs: dict[str, Any], *, key: str) -> None:
+    if "ecs" not in kwargs or kwargs["ecs"] is None:
+        return
+    kwargs["ecs"] = _parse_ecs_option(kwargs["ecs"], key=key)
+
+
+def _parse_ecs_option(raw_value: Any, *, key: str) -> dns.edns.ECSOption:
+    if isinstance(raw_value, str):
+        value = raw_value.strip()
+        if not value:
+            raise ValueError(f"{key} 不能为空")
+        try:
+            return dns.edns.ECSOption.from_text(value)
+        except ValueError:
+            try:
+                return dns.edns.ECSOption(value)
+            except Exception as exc:
+                raise ValueError(f"{key} 不是合法的 ECS 配置") from exc
+
+    if isinstance(raw_value, dict):
+        address = raw_value.get("address")
+        if not isinstance(address, str) or not address.strip():
+            raise ValueError(f"{key}.address 必须是非空字符串")
+        srclen = raw_value.get("srclen")
+        scopelen = raw_value.get("scopelen", 0)
+        try:
+            parsed_srclen = None if srclen is None else int(srclen)
+            parsed_scopelen = int(scopelen)
+            return dns.edns.ECSOption(
+                address.strip(),
+                srclen=parsed_srclen,
+                scopelen=parsed_scopelen,
+            )
+        except Exception as exc:
+            raise ValueError(f"{key} 不是合法的 ECS 配置") from exc
+
+    raise ValueError(f"{key} 必须是字符串或对象")
 
 
 def _ensure_mapping(
