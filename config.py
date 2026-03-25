@@ -16,7 +16,9 @@ from core.hooks import RequestHook, ResolverHook, ResponseHook
 from core.ipset import init_ipset, ipset
 from core.pipeline import Pipeline
 from plugins.builtin import NoopRequestHook, NoopResolverHook, NoopResponseHook
-from plugins.tagset import RewriteByIPTagResolverHook, TagSetRequestHook
+from plugins.cache import CacheHook
+from plugins.domain_rule import DomainRuleRequestHook
+from plugins.ip_rule import IPRuleResolverHook
 from plugins.speedcheck import RewriteAnswerByRTTHook, SpeedCheckResolverHook
 from resolver.resolver import Resolver
 
@@ -76,7 +78,13 @@ def build_runtime_config(
     domainset_section = _ensure_mapping(
         raw.get("domainset"), key="domainset", allow_none=True
     )
+    domain_rules_section = _ensure_mapping(
+        raw.get("domain_rules"), key="domain_rules", allow_none=True
+    )
     ipset_section = _ensure_mapping(raw.get("ipset"), key="ipset", allow_none=True)
+    ip_rules_section = _ensure_mapping(
+        raw.get("ip_rules"), key="ip_rules", allow_none=True
+    )
     domainset_cache_file = _normalize_optional_path(
         raw.get("domainset_cache_file"),
         key="domainset_cache_file",
@@ -106,21 +114,28 @@ def build_runtime_config(
         expected_base=ResolverHook,
         default_factory=_default_resolver_hooks,
     )
-    _validate_resolver_hook_order(resolver_hooks)
     response_hooks = _build_hooks(
         hooks_section.get("response"),
         stage="response",
         expected_base=ResponseHook,
         default_factory=_default_response_hooks,
     )
-    tagset_hook = _build_tagset_hook(
+    _init_rule_sets(
         domainset_section=domainset_section,
         ipset_section=ipset_section,
         base_dir=base_dir,
         domainset_cache_file=domainset_cache_file,
     )
-    if tagset_hook is not None:
-        request_hooks = [tagset_hook, *request_hooks]
+    domain_rule_hook = _build_domain_rule_hook(domain_rules_section)
+    if domain_rule_hook is not None:
+        request_hooks = _insert_domain_rule_hook(request_hooks, domain_rule_hook)
+
+    ip_rule_hook = _build_ip_rule_hook(ip_rules_section)
+    if ip_rule_hook is not None:
+        resolver_hooks = _insert_ip_rule_hook(resolver_hooks, ip_rule_hook)
+
+    _validate_request_hook_order(request_hooks)
+    _validate_resolver_hook_order(resolver_hooks)
 
     pipeline = Pipeline(
         resolvers=resolvers,
@@ -325,13 +340,13 @@ def _ensure_mapping(
     return dict(value)
 
 
-def _build_tagset_hook(
+def _init_rule_sets(
     *,
     domainset_section: dict[str, Any],
     ipset_section: dict[str, Any],
     base_dir: Path | None,
     domainset_cache_file: str | None,
-) -> TagSetRequestHook | None:
+) -> None:
     domainset_mapping = _normalize_tag_to_files(
         domainset_section,
         key="domainset",
@@ -346,9 +361,34 @@ def _build_tagset_hook(
         cache_file=domainset_cache_file,
     )
     init_ipset(ipset_mapping, base_dir=base_dir)
-    if not domainset.tags and not ipset.tags:
+
+
+def _build_domain_rule_hook(
+    raw_rules: dict[str, Any],
+) -> DomainRuleRequestHook | None:
+    if raw_rules:
+        _validate_rule_tags(
+            raw_rules,
+            available_tags=domainset.tags,
+            key="domain_rules",
+        )
+    if not domainset.tags and not raw_rules:
         return None
-    return TagSetRequestHook()
+    return DomainRuleRequestHook(rules=raw_rules)
+
+
+def _build_ip_rule_hook(
+    raw_rules: dict[str, Any],
+) -> IPRuleResolverHook | None:
+    if raw_rules:
+        _validate_rule_tags(
+            raw_rules,
+            available_tags=ipset.tags,
+            key="ip_rules",
+        )
+    if not raw_rules:
+        return None
+    return IPRuleResolverHook(rules=raw_rules)
 
 
 def _normalize_tag_to_files(
@@ -391,12 +431,61 @@ def _normalize_optional_path(raw_value: Any, *, key: str) -> str | None:
     return value
 
 
+def _validate_rule_tags(
+    raw_rules: dict[str, Any],
+    *,
+    available_tags: set[str],
+    key: str,
+) -> None:
+    unknown = [tag for tag in raw_rules if tag not in available_tags]
+    if unknown:
+        raise ValueError(
+            f"{key} 引用了未定义的 tag: {', '.join(sorted(unknown))}"
+        )
+
+
+def _insert_domain_rule_hook(
+    hooks: list[RequestHook],
+    hook: DomainRuleRequestHook,
+) -> list[RequestHook]:
+    insert_at = 0
+    for index, existing in enumerate(hooks):
+        if isinstance(existing, CacheHook):
+            insert_at = index + 1
+    return [*hooks[:insert_at], hook, *hooks[insert_at:]]
+
+
+def _insert_ip_rule_hook(
+    hooks: list[ResolverHook],
+    hook: IPRuleResolverHook,
+) -> list[ResolverHook]:
+    for index, existing in enumerate(hooks):
+        if isinstance(existing, SpeedCheckResolverHook):
+            return [*hooks[:index], hook, *hooks[index:]]
+    return [*hooks, hook]
+
+
 def _default_request_hooks() -> list[RequestHook]:
     return [NoopRequestHook()]
 
 
 def _default_resolver_hooks() -> list[ResolverHook]:
     return [NoopResolverHook(), SpeedCheckResolverHook()]
+
+
+def _validate_request_hook_order(hooks: list[RequestHook]) -> None:
+    cache_indexes = [
+        index for index, hook in enumerate(hooks) if isinstance(hook, CacheHook)
+    ]
+    if not cache_indexes:
+        return
+    last_cache = max(cache_indexes)
+    for index, hook in enumerate(hooks):
+        if isinstance(hook, DomainRuleRequestHook) and index < last_cache:
+            raise ValueError(
+                "plugins.domain_rule.DomainRuleRequestHook 必须位于 "
+                "plugins.cache.CacheHook 之后"
+            )
 
 
 def _validate_resolver_hook_order(hooks: list[ResolverHook]) -> None:
@@ -407,9 +496,9 @@ def _validate_resolver_hook_order(hooks: list[ResolverHook]) -> None:
         return
     first_speedcheck = min(speedcheck_indexes)
     for index, hook in enumerate(hooks):
-        if isinstance(hook, RewriteByIPTagResolverHook) and index > first_speedcheck:
+        if isinstance(hook, IPRuleResolverHook) and index > first_speedcheck:
             raise ValueError(
-                "plugins.tagset.RewriteByIPTagResolverHook 必须位于 "
+                "plugins.ip_rule.IPRuleResolverHook 必须位于 "
                 "plugins.speedcheck.SpeedCheckResolverHook 之前"
             )
 

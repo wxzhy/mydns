@@ -29,6 +29,34 @@ ipset:
   telegram:
     - rules/geoip/telegram.list
 
+# 按命中的 domainset tag 执行动作，并同步更新 ctx.tags。
+# action:
+#   intercept: A/AAAA 返回 localhost，TTL 为 1d；其他类型返回空 NOERROR
+#   hosts: A/AAAA 返回指定 IP，不转发；其他类型继续转发
+domain_rules:
+  ads:
+    action: intercept
+  private:
+    action: hosts
+    A: 192.168.1.10
+    AAAA: "fd00::10"
+
+# 按命中的 ipset tag 改写上游返回的 A/AAAA 地址。
+# action:
+#   replace: 直接替换成指定 IP
+#   replace_prefix: 用目标前缀替换源 IP 的网络前缀，保留主机位
+#   remove: 删除该 IP
+ip_rules:
+  telegram:
+    action: replace
+    A: 203.0.113.10
+    AAAA: "2001:db8::10"
+  cn:
+    action: replace_prefix
+    A: 198.18.0.0/15
+  private:
+    action: remove
+
 resolvers:
   # 已移除冗余参数：source/source_port/http_version/ssl_context/family/post
   # tcp/udp 可选 use_tricks: true，启用 tricks 中的自定义 socket
@@ -97,33 +125,51 @@ resolvers:
     use_tricks: true
 
 hooks:
+  # hook 支持两种写法：
+  # 1. 只有类路径的简写，适合无参数插件
+  #    - plugins.builtin.NoopRequestHook
+  # 2. class + kwargs 的完整写法，适合带参数插件
+  #    - class: plugins.cache.CacheHook
+  #      kwargs:
+  #        cache_name: default-main
+  #        max_size: 100000
+  #
+  # 当前内置插件示例：
+  # - plugins.builtin.NoopRequestHook / NoopResolverHook / NoopResponseHook
+  # - plugins.cache.CacheHook
+  # - plugins.speedcheck.SpeedCheckResolverHook
+  # - plugins.speedcheck.RewriteAnswerByRTTHook
   request:
+    # 简写：无参数请求阶段插件
+    # 可用于占位、调试或作为自定义插件的参考格式
+    - plugins.builtin.NoopRequestHook
+    # 完整写法：请求阶段读缓存；response 阶段使用同名 cache_name 写回
     - class: plugins.cache.CacheHook
       kwargs:
         cache_name: default-main
         max_size: 100000
-    - plugins.builtin.NoopRequestHook
+        # 默认只缓存 NOERROR(0)；如需同时缓存 NXDOMAIN，可改为 [0, 3]
+        # cacheable_rcodes: [0, 3]
+    # domain_rules 对应的 hook 会在这里自动插到 cache 之后。
   resolver:
+    # 简写：无参数上游结果插件
     - plugins.builtin.NoopResolverHook
-    # 按上游返回 IP 命中的 ipset tag 改写结果；必须放在测速前。
-    - class: plugins.tagset.RewriteByIPTagResolverHook
-      kwargs:
-        replacements:
-          telegram:
-            A: 203.0.113.10
-            AAAA: "2001:db8::10"
-          private:
-            A: 127.0.0.1
-            AAAA: "::1"
+    # ip_rules 对应的 hook 会自动插在测速之前。
+    # 完整写法：对 A/AAAA 候选 IP 执行测速，结果写入 ctx.ip_list
     - class: plugins.speedcheck.SpeedCheckResolverHook
       kwargs:
         timeout_s: 0.8
+        max_size: 10000
+        ttl_s: 3600
   response:
+    # 简写：无参数响应阶段插件
     - plugins.builtin.NoopResponseHook
+    # 完整写法：根据测速 RTT 重写最终返回的 A/AAAA 记录
     - class: plugins.speedcheck.RewriteAnswerByRTTHook
       kwargs:
         max_return_ips: 2
         ttl_s: 900
+    # 与 request 阶段使用相同 cache_name，形成读写同一个共享缓存
     - class: plugins.cache.CacheHook
       kwargs:
         cache_name: default-main

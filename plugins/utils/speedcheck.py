@@ -5,12 +5,20 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Iterable
+from typing import Any
 
+from async_lru import alru_cache
 from icmplib import async_ping
 
 from logger import get_logger
 
 logger = get_logger("plugins.utils.speedcheck")
+
+DEFAULT_PROBE_CACHE_MAX_SIZE = 10000
+DEFAULT_PROBE_CACHE_TTL_S = 3600.0
+
+_probe_cache_max_size = DEFAULT_PROBE_CACHE_MAX_SIZE
+_probe_cache_ttl_s = DEFAULT_PROBE_CACHE_TTL_S
 
 
 async def probe_ips(
@@ -31,6 +39,11 @@ async def probe_ips(
     return results
 
 
+def _decorate_probe_one_ip(func: Any) -> Any:
+    return alru_cache(maxsize=_probe_cache_max_size, ttl=_probe_cache_ttl_s)(func)
+
+
+@_decorate_probe_one_ip
 async def probe_one_ip(ip: str, timeout_s: float) -> float | None:
     """针对单个 IP 并行测速，拿到首个成功 RTT 即返回。"""
     tasks = [
@@ -52,6 +65,79 @@ async def probe_one_ip(ip: str, timeout_s: float) -> float | None:
             if not task.done():
                 task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+
+
+_RAW_PROBE_ONE_IP = probe_one_ip.__wrapped__
+
+
+def configure(
+    *,
+    max_size: int | None = None,
+    ttl_s: float | None = None,
+) -> tuple[int, float]:
+    """配置全局单 IP 测速缓存。未传参数时回落默认值。"""
+    global _probe_cache_max_size, _probe_cache_ttl_s
+
+    _probe_cache_max_size = _normalize_cache_max_size(max_size)
+    _probe_cache_ttl_s = _normalize_cache_ttl(ttl_s)
+    _reset_probe_one_ip_cache()
+    logger.debug(
+        "测速缓存配置更新 max_size=%s ttl_s=%.3fs",
+        _probe_cache_max_size,
+        _probe_cache_ttl_s,
+    )
+    return get_probe_cache_config()
+
+
+def configure_probe_cache(
+    *,
+    max_size: int | None = None,
+    ttl_s: float | None = None,
+) -> tuple[int, float]:
+    """兼容旧调用名。"""
+    return configure(max_size=max_size, ttl_s=ttl_s)
+
+
+def get_probe_cache_config() -> tuple[int, float]:
+    return (_probe_cache_max_size, _probe_cache_ttl_s)
+
+
+def clear_probe_cache() -> None:
+    _reset_probe_one_ip_cache()
+
+
+def _reset_probe_one_ip_cache() -> None:
+    global probe_one_ip
+
+    old_probe_one_ip = probe_one_ip
+    probe_one_ip = _decorate_probe_one_ip(_RAW_PROBE_ONE_IP)
+    cache_clear = getattr(old_probe_one_ip, "cache_clear", None)
+    if callable(cache_clear):
+        cache_clear()
+
+
+def _normalize_cache_max_size(max_size: int | None) -> int:
+    if max_size is None:
+        return DEFAULT_PROBE_CACHE_MAX_SIZE
+    try:
+        normalized = int(max_size)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("speedcheck cache max_size 必须是正整数") from exc
+    if normalized <= 0:
+        raise ValueError("speedcheck cache max_size 必须是正整数")
+    return normalized
+
+
+def _normalize_cache_ttl(ttl_s: float | None) -> float:
+    if ttl_s is None:
+        return DEFAULT_PROBE_CACHE_TTL_S
+    try:
+        normalized = float(ttl_s)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("speedcheck cache ttl_s 必须是正数") from exc
+    if normalized <= 0:
+        raise ValueError("speedcheck cache ttl_s 必须是正数")
+    return normalized
 
 
 async def _probe_ping(ip: str, timeout_s: float) -> float | None:

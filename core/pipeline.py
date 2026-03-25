@@ -5,6 +5,7 @@ from __future__ import annotations
 import dns.rcode
 
 from core.answer import Answer
+from core.cache import fail_pending_request, resolve_pending_request
 from core.context import QueryContext
 from core.hooks import RequestHook, ResolverHook, ResponseHook
 from logger import get_logger
@@ -38,31 +39,36 @@ class Pipeline:
 
     async def process(self, ctx: QueryContext) -> Answer:
         """执行完整流水线并返回最终响应。"""
-        logger.debug(
-            "处理请求 qname=%s qtype=%s client=%s tags=%s",
-            ctx.query.qname.to_text(),
-            ctx.query.qtype,
-            ctx.query.client_addr,
-            sorted(ctx.tags),
-        )
-        await self._run_request_hooks(ctx)
-        if not ctx.stop:
-            await self._run_upstream(ctx)
-        else:
-            logger.debug("请求被request hook短路 qname=%s", ctx.query.qname.to_text())
+        try:
+            logger.debug(
+                "处理请求 qname=%s qtype=%s client=%s tags=%s",
+                ctx.query.qname.to_text(),
+                ctx.query.qtype,
+                ctx.query.client_addr,
+                sorted(ctx.tags),
+            )
+            await self._run_request_hooks(ctx)
+            if not ctx.stop:
+                await self._run_upstream(ctx)
+            else:
+                logger.debug("请求被request hook短路 qname=%s", ctx.query.qname.to_text())
 
-        await self._run_response_hooks(ctx)
-        if ctx.final_answer is None:
-            ctx.final_answer = self._fallback_answer(ctx)
-        logger.debug(
-            "响应完成 qname=%s qtype=%s rcode=%s rrset_count=%s candidate_count=%s",
-            ctx.query.qname.to_text(),
-            ctx.query.qtype,
-            ctx.final_answer.response.rcode(),
-            len(ctx.final_answer.response.answer),
-            len(ctx.candidates),
-        )
-        return ctx.final_answer
+            await self._run_response_hooks(ctx)
+            if ctx.final_answer is None:
+                ctx.final_answer = self._fallback_answer(ctx)
+            await resolve_pending_request(ctx.state, ctx.final_answer)
+            logger.debug(
+                "响应完成 qname=%s qtype=%s rcode=%s rrset_count=%s candidate_count=%s",
+                ctx.query.qname.to_text(),
+                ctx.query.qtype,
+                ctx.final_answer.response.rcode(),
+                len(ctx.final_answer.response.answer),
+                len(ctx.candidates),
+            )
+            return ctx.final_answer
+        except BaseException as exc:
+            await fail_pending_request(ctx.state, exc)
+            raise
 
     async def _run_request_hooks(self, ctx: QueryContext) -> None:
         for hook in self.request_hooks:

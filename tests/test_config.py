@@ -13,9 +13,11 @@ import dns.edns
 from config import build_runtime_config, load_runtime_config
 from core.domainset import domainset
 from plugins.builtin import NoopRequestHook
-from plugins.tagset import RewriteByIPTagResolverHook
-from plugins.tagset import TagSetRequestHook
+from plugins.cache import CacheHook
+from plugins.domain_rule import DomainRuleRequestHook
+from plugins.ip_rule import IPRuleResolverHook
 from plugins.speedcheck import SpeedCheckResolverHook
+from plugins.utils.speedcheck import configure_probe_cache, get_probe_cache_config
 from resolver.quic_resolver import QuicUpstreamResolver
 from resolver.udp_resolver import UdpUpstreamResolver
 
@@ -70,7 +72,38 @@ class TestConfig(unittest.TestCase):
         self.assertEqual(runtime.pipeline.resolver_manager.resolvers[0].tags, {"default", "oversea"})
         self.assertIsInstance(runtime.pipeline.resolver_manager.resolvers[1], QuicUpstreamResolver)
         self.assertIsInstance(runtime.pipeline.resolver_manager.resolver_hooks[0], SpeedCheckResolverHook)
+        self.assertAlmostEqual(runtime.pipeline.resolver_manager.resolver_hooks[0].timeout_s, 0.3)
         self.assertEqual(runtime.pipeline.response_hooks[0].max_return_ips, 1)
+
+    def test_speedcheck_hook_cache_config_should_load(self) -> None:
+        original_cache_config = get_probe_cache_config()
+        self.addCleanup(
+            lambda: configure_probe_cache(
+                max_size=original_cache_config[0],
+                ttl_s=original_cache_config[1],
+            )
+        )
+        raw = {
+            "hooks": {
+                "resolver": [
+                    {
+                        "class": "plugins.speedcheck.SpeedCheckResolverHook",
+                        "kwargs": {
+                            "timeout_s": 0.3,
+                            "max_size": 10000,
+                            "ttl_s": 3600,
+                        },
+                    }
+                ]
+            }
+        }
+
+        runtime = build_runtime_config(raw)
+        hook = runtime.pipeline.resolver_manager.resolver_hooks[0]
+
+        self.assertIsInstance(hook, SpeedCheckResolverHook)
+        self.assertAlmostEqual(hook.timeout_s, 0.3)
+        self.assertEqual(get_probe_cache_config(), (10000, 3600.0))
 
     def test_resolver_timeout_and_ecs_should_load_from_config(self) -> None:
         raw = {
@@ -165,54 +198,102 @@ class TestConfig(unittest.TestCase):
                     domainset:
                       cn:
                         - domains.txt
+                    domain_rules:
+                      cn: intercept
                     ipset:
                       office:
                         - ips.txt
+                    ip_rules:
+                      office: remove
                     """
                 ),
                 encoding="utf-8",
             )
 
             runtime = load_runtime_config(base / "mydns.yaml")
-            self.assertIsInstance(runtime.pipeline.request_hooks[0], TagSetRequestHook)
+            self.assertIsInstance(runtime.pipeline.request_hooks[0], DomainRuleRequestHook)
             hook = runtime.pipeline.request_hooks[0]
             self.assertIn("cn", hook.domainset_by_tag)
-            self.assertIn("office", hook.ipset_by_tag)
+            self.assertTrue(
+                any(
+                    isinstance(item, IPRuleResolverHook)
+                    for item in runtime.pipeline.resolver_manager.resolver_hooks
+                )
+            )
 
-    def test_rewrite_ip_tag_hook_should_load_before_speedcheck(self) -> None:
+    def test_domain_rule_hook_should_load_after_cache(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mydns-domain-rule-order-") as td:
+            base = Path(td)
+            (base / "domains.txt").write_text("example.cn\n", encoding="utf-8")
+            path = base / "mydns.yaml"
+            path.write_text(
+                textwrap.dedent(
+                    """
+                    domainset:
+                      cn:
+                        - domains.txt
+                    domain_rules:
+                      cn: intercept
+                    hooks:
+                      request:
+                        - class: plugins.cache.CacheHook
+                        - plugins.builtin.NoopRequestHook
+                    """
+                ),
+                encoding="utf-8",
+            )
+
+            runtime = load_runtime_config(path)
+
+        self.assertIsInstance(runtime.pipeline.request_hooks[0], CacheHook)
+        self.assertIsInstance(runtime.pipeline.request_hooks[1], DomainRuleRequestHook)
+        self.assertIsInstance(runtime.pipeline.request_hooks[2], NoopRequestHook)
+
+    def test_ip_rule_hook_should_load_before_speedcheck(self) -> None:
         content = """
+        ipset:
+          telegram:
+            - telegram.txt
+        ip_rules:
+          telegram:
+            action: replace
+            A: 203.0.113.10
         hooks:
           resolver:
-            - class: plugins.tagset.RewriteByIPTagResolverHook
-              kwargs:
-                replacements:
-                  telegram:
-                    A: 203.0.113.10
             - class: plugins.speedcheck.SpeedCheckResolverHook
         """
-        runtime = load_runtime_config(self._write_temp_yaml(content))
+        with tempfile.TemporaryDirectory(prefix="mydns-ip-rule-") as td:
+            base = Path(td)
+            (base / "telegram.txt").write_text("1.1.1.0/24\n", encoding="utf-8")
+            path = base / "mydns.yaml"
+            path.write_text(textwrap.dedent(content), encoding="utf-8")
+            runtime = load_runtime_config(path)
 
         self.assertIsInstance(
             runtime.pipeline.resolver_manager.resolver_hooks[0],
-            RewriteByIPTagResolverHook,
+            IPRuleResolverHook,
         )
         self.assertIsInstance(
             runtime.pipeline.resolver_manager.resolver_hooks[1],
             SpeedCheckResolverHook,
         )
 
-    def test_rewrite_ip_tag_hook_after_speedcheck_should_raise(self) -> None:
+    def test_ip_rule_hook_after_speedcheck_should_raise(self) -> None:
         raw = {
+            "ipset": {
+                "telegram": ["telegram.txt"],
+            },
             "hooks": {
                 "resolver": [
                     "plugins.speedcheck.SpeedCheckResolverHook",
                     {
-                        "class": "plugins.tagset.RewriteByIPTagResolverHook",
+                        "class": "plugins.ip_rule.IPRuleResolverHook",
                         "kwargs": {
-                            "replacements": {
+                            "rules": {
                                 "telegram": {
+                                    "action": "replace",
                                     "A": "203.0.113.10",
-                                }
+                                },
                             }
                         },
                     },
@@ -220,8 +301,11 @@ class TestConfig(unittest.TestCase):
             }
         }
 
-        with self.assertRaises(ValueError):
-            build_runtime_config(raw)
+        with tempfile.TemporaryDirectory(prefix="mydns-ip-rule-order-") as td:
+            base = Path(td)
+            (base / "telegram.txt").write_text("1.1.1.0/24\n", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                build_runtime_config(raw, base_dir=base)
 
     def test_domainset_cache_file_should_prefer_cache(self) -> None:
         with tempfile.TemporaryDirectory(prefix="mydns-domainset-cache-") as td:

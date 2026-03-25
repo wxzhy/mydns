@@ -12,6 +12,8 @@ import dns.rcode
 import dns.rdatatype
 import dns.rrset
 
+import plugins.speedcheck as speedcheck_module
+import plugins.utils.speedcheck as speedcheck_utils
 from core.answer import Answer, make_answer
 from core.context import QueryContext
 from core.models import Query, ResolverResult
@@ -38,6 +40,22 @@ def _make_a_answer(*ips: str) -> Answer:
 
 
 class TestSpeedcheckHooks(unittest.IsolatedAsyncioTestCase):
+    async def test_resolver_hook_should_configure_global_probe_cache_from_kwargs(self) -> None:
+        original_configure = speedcheck_module.configure
+        built_args: list[tuple[int, float]] = []
+        try:
+            def fake_configure(*, max_size: int | None = None, ttl_s: float | None = None) -> None:
+                built_args.append((int(max_size or 0), float(ttl_s or 0)))
+
+            speedcheck_module.configure = fake_configure
+
+            hook = SpeedCheckResolverHook(max_size=10000, ttl_s=3600)
+
+            self.assertEqual(built_args, [(10000, 3600.0)])
+            self.assertIs(hook.probe_func, speedcheck_utils.probe_ips)
+        finally:
+            speedcheck_module.configure = original_configure
+
     async def test_resolver_hook_collect_rtt(self) -> None:
         async def fake_probe(ips: list[str], timeout_s: float) -> dict[str, float | None]:
             _ = timeout_s

@@ -18,7 +18,7 @@ from core.context import QueryContext
 from core.hooks import ResolverHook, ResponseHook
 from core.models import ResolverResult
 from logger import get_logger
-from plugins.utils.speedcheck import probe_ips
+from plugins.utils.speedcheck import configure, probe_ips
 from upstream.selector import select_best_answer
 
 
@@ -33,8 +33,11 @@ class SpeedCheckResolverHook(ResolverHook):
         self,
         *,
         timeout_s: float = 0.8,
+        max_size: int | None = None,
+        ttl_s: float | None = None,
         probe_func: ProbeIPsFunc | None = None,
     ) -> None:
+        configure(max_size=max_size, ttl_s=ttl_s)
         self.timeout_s = timeout_s
         self.probe_func = probe_func or probe_ips
 

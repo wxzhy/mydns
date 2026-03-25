@@ -6,6 +6,7 @@ from typing import Iterable
 
 import dns.rcode
 
+from core.answer import Answer
 from core.cache import AnswerLRUCache, build_cache_key
 from core.context import QueryContext
 from core.hooks import RequestHook, ResponseHook
@@ -51,6 +52,19 @@ class CacheHook(RequestHook, ResponseHook):
         ctx.state["cache_key"] = key
         if answer is None:
             ctx.state["cache_hit"] = False
+            pending, future = await self.cache.acquire_pending(key)
+            ctx.state["cache_pending_request"] = pending
+            if pending.owner:
+                return
+            waited = await future
+            ctx.state["cache_wait"] = True
+            ctx.final_answer = Answer.from_answer(waited)
+            ctx.stop = True
+            logger.debug(
+                "等待同 key 请求完成 qname=%s qtype=%s",
+                ctx.query.qname.to_text(),
+                ctx.query.qtype,
+            )
             return
         ctx.state["cache_hit"] = True
         ctx.final_answer = answer
@@ -62,7 +76,7 @@ class CacheHook(RequestHook, ResponseHook):
         )
 
     async def on_response(self, ctx: QueryContext) -> None:
-        if ctx.state.get("cache_hit"):
+        if ctx.state.get("cache_hit") or ctx.state.get("cache_wait"):
             return
         answer = ctx.final_answer
         if answer is None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 import unittest
 
@@ -41,6 +42,27 @@ class _CountingResolver(Resolver):
     async def resolve(self, query: Query, timeout_s: float) -> Answer:
         _ = timeout_s
         self.calls += 1
+        rrsets: list[dns.rrset.RRset] | None = None
+        if self.rcode == dns.rcode.NOERROR and query.qtype == dns.rdatatype.A:
+            rrsets = [dns.rrset.from_text(query.qname.to_text(), 30, "IN", "A", "1.1.1.1")]
+        return Answer.from_query(query, rcode=self.rcode, rrsets=rrsets)
+
+
+class _BlockingResolver(Resolver):
+    name = "blocking"
+    tags = {"default"}
+
+    def __init__(self, *, rcode: dns.rcode.Rcode = dns.rcode.NOERROR) -> None:
+        self.calls = 0
+        self.rcode = rcode
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def resolve(self, query: Query, timeout_s: float) -> Answer:
+        _ = timeout_s
+        self.calls += 1
+        self.started.set()
+        await self.release.wait()
         rrsets: list[dns.rrset.RRset] | None = None
         if self.rcode == dns.rcode.NOERROR and query.qtype == dns.rdatatype.A:
             rrsets = [dns.rrset.from_text(query.qname.to_text(), 30, "IN", "A", "1.1.1.1")]
@@ -118,6 +140,59 @@ class TestCacheHook(unittest.IsolatedAsyncioTestCase):
         await pipeline.process(QueryContext(query=_make_query()))
         await pipeline.process(QueryContext(query=_make_query()))
         self.assertEqual(resolver.calls, 1)
+
+    async def test_same_pending_request_should_wait_and_share_result(self) -> None:
+        resolver = _BlockingResolver()
+        cache_hook = CacheHook(cache=AnswerLRUCache(max_size=64))
+        pipeline = Pipeline(
+            resolvers=[resolver],
+            request_hooks=[cache_hook],
+            response_hooks=[RewriteAnswerByRTTHook(), cache_hook],
+        )
+
+        first_ctx = QueryContext(query=_make_query())
+        first_task = asyncio.create_task(pipeline.process(first_ctx))
+        await resolver.started.wait()
+
+        second_ctx = QueryContext(query=_make_query())
+        second_task = asyncio.create_task(pipeline.process(second_ctx))
+        await asyncio.sleep(0.05)
+        self.assertEqual(resolver.calls, 1)
+
+        resolver.release.set()
+        first_answer, second_answer = await asyncio.gather(first_task, second_task)
+
+        self.assertEqual(resolver.calls, 1)
+        self.assertFalse(first_ctx.state.get("cache_wait", False))
+        self.assertTrue(second_ctx.state.get("cache_wait", False))
+        self.assertEqual(first_answer.response.rcode(), dns.rcode.NOERROR)
+        self.assertEqual(second_answer.response.rcode(), dns.rcode.NOERROR)
+        self.assertEqual(
+            [rdata.to_text() for rdata in first_answer.rrset],
+            [rdata.to_text() for rdata in second_answer.rrset],
+        )
+
+    async def test_same_pending_nxdomain_should_only_query_upstream_once(self) -> None:
+        resolver = _BlockingResolver(rcode=dns.rcode.NXDOMAIN)
+        cache_hook = CacheHook(cache=AnswerLRUCache(max_size=64))
+        pipeline = Pipeline(
+            resolvers=[resolver],
+            request_hooks=[cache_hook],
+            response_hooks=[RewriteAnswerByRTTHook(), cache_hook],
+        )
+
+        first_task = asyncio.create_task(pipeline.process(QueryContext(query=_make_query())))
+        await resolver.started.wait()
+        second_task = asyncio.create_task(pipeline.process(QueryContext(query=_make_query())))
+        await asyncio.sleep(0.05)
+        self.assertEqual(resolver.calls, 1)
+
+        resolver.release.set()
+        first_answer, second_answer = await asyncio.gather(first_task, second_task)
+
+        self.assertEqual(resolver.calls, 1)
+        self.assertEqual(first_answer.response.rcode(), dns.rcode.NXDOMAIN)
+        self.assertEqual(second_answer.response.rcode(), dns.rcode.NXDOMAIN)
 
 
 if __name__ == "__main__":
