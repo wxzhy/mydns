@@ -6,8 +6,11 @@ import asyncio
 import time
 import unittest
 
+import dns.message
 import dns.name
+import dns.opcode
 import dns.rcode
+import dns.rdataclass
 import dns.rdatatype
 
 from core.answer import Answer
@@ -47,19 +50,26 @@ class _SleepResolver(Resolver):
         return Answer.from_query(query, rcode=dns.rcode.NOERROR)
 
 
-class _DropErrorHook(ResolverHook):
+class _RecordHook(ResolverHook):
     async def on_resolver_result(
         self,
         ctx: QueryContext,
         result: ResolverResult,
     ) -> ResolverResult | None:
         ctx.state.setdefault("resolver_hook_calls", []).append(result.resolver_name)
-        if result.error is not None:
-            return None
         return result
 
 
-class _RewriteRcodeHook(ResolverHook):
+class _MutateAnswerHook(ResolverHook):
+    def __init__(
+        self,
+        *,
+        rcode: dns.rcode.Rcode = dns.rcode.NXDOMAIN,
+        tag: str = "hooked",
+    ) -> None:
+        self.rcode = rcode
+        self.tag = tag
+
     async def on_resolver_result(
         self,
         ctx: QueryContext,
@@ -68,7 +78,8 @@ class _RewriteRcodeHook(ResolverHook):
         _ = ctx
         if result.answer is not None:
             assert isinstance(result.answer, Answer)
-            result.answer.set_rcode(dns.rcode.NOERROR)
+            result.answer.tags.add(self.tag)
+            result.answer.set_rcode(self.rcode)
         return result
 
 
@@ -175,26 +186,130 @@ class TestResolverManagerStep3(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.ctx.candidates), 1)
         self.assertIsNotNone(self.ctx.candidates[0].error)
 
-    async def test_exception_isolation_and_hook_rewrite(self) -> None:
+    async def test_hook_should_skip_error_result_and_keep_candidate(self) -> None:
         manager = ResolverManager(
             resolvers=[
                 _SleepResolver("bad", delay_s=0.01, error=RuntimeError("boom")),
                 _SleepResolver(
                     "good",
                     delay_s=0.01,
-                    answer=Answer.from_query(self.ctx.query, rcode=dns.rcode.NXDOMAIN),
+                    answer=Answer.from_query(self.ctx.query, rcode=dns.rcode.NOERROR),
                 ),
             ],
-            resolver_hooks=[_DropErrorHook(), _RewriteRcodeHook()],
+            resolver_hooks=[_RecordHook(), _MutateAnswerHook()],
         )
 
         await manager.collect(self.ctx, timeout_s=0.2)
         calls = self.ctx.state["resolver_hook_calls"]
-        self.assertEqual(len(calls), 2)
-        self.assertEqual(set(calls), {"bad", "good"})
+        self.assertEqual(calls, ["good"])
+        self.assertEqual(len(self.ctx.candidates), 2)
+        candidates = {item.resolver_name: item for item in self.ctx.candidates}
+        self.assertIsNotNone(candidates["bad"].error)
+        self.assertIsNotNone(candidates["good"].answer)
+        self.assertEqual(candidates["good"].answer.response.rcode(), dns.rcode.NXDOMAIN)
+        self.assertIn("hooked", candidates["good"].answer.tags)
+
+    async def test_hook_should_skip_non_noerror_response(self) -> None:
+        manager = ResolverManager(
+            resolvers=[
+                _SleepResolver(
+                    "nxdomain",
+                    delay_s=0.01,
+                    answer=Answer.from_query(self.ctx.query, rcode=dns.rcode.NXDOMAIN),
+                ),
+            ],
+            resolver_hooks=[_RecordHook(), _MutateAnswerHook()],
+        )
+
+        await manager.collect(self.ctx, timeout_s=0.2)
+
+        self.assertNotIn("resolver_hook_calls", self.ctx.state)
         self.assertEqual(len(self.ctx.candidates), 1)
-        self.assertEqual(self.ctx.candidates[0].resolver_name, "good")
-        self.assertEqual(self.ctx.candidates[0].answer.response.rcode(), dns.rcode.NOERROR)
+        self.assertIsNotNone(self.ctx.candidates[0].answer)
+        self.assertEqual(
+            self.ctx.candidates[0].answer.response.rcode(),
+            dns.rcode.NXDOMAIN,
+        )
+        self.assertNotIn("hooked", self.ctx.candidates[0].answer.tags)
+
+    async def test_hook_should_skip_invalid_opcode_response(self) -> None:
+        ctx = self._new_ctx(dns.rdatatype.A)
+        answer = Answer.from_query(ctx.query, rcode=dns.rcode.NOERROR)
+        answer.response.set_opcode(dns.opcode.NOTIFY)
+        manager = ResolverManager(
+            resolvers=[
+                _SleepResolver(
+                    "invalid-opcode",
+                    delay_s=0.01,
+                    answer=answer,
+                ),
+            ],
+            resolver_hooks=[_RecordHook(), _MutateAnswerHook()],
+        )
+
+        await manager.collect(ctx, timeout_s=0.2)
+
+        self.assertNotIn("resolver_hook_calls", ctx.state)
+        self.assertEqual(len(ctx.candidates), 1)
+        self.assertIsNotNone(ctx.candidates[0].answer)
+        self.assertEqual(ctx.candidates[0].answer.response.opcode(), dns.opcode.NOTIFY)
+        self.assertEqual(ctx.candidates[0].answer.response.rcode(), dns.rcode.NOERROR)
+        self.assertNotIn("hooked", ctx.candidates[0].answer.tags)
+
+    async def test_hook_should_skip_invalid_qclass_response(self) -> None:
+        request = dns.message.make_query(
+            "example.com.",
+            dns.rdatatype.A,
+            dns.rdataclass.CH,
+        )
+        ctx = QueryContext(
+            query=Query(
+                client_addr=("127.0.0.1", 5335),
+                qname=dns.name.from_text("example.com."),
+                qtype=dns.rdatatype.A,
+                message=request,
+            )
+        )
+        manager = ResolverManager(
+            resolvers=[
+                _SleepResolver(
+                    "invalid-qclass",
+                    delay_s=0.01,
+                    answer=Answer.from_query(ctx.query, rcode=dns.rcode.NOERROR),
+                ),
+            ],
+            resolver_hooks=[_RecordHook(), _MutateAnswerHook()],
+        )
+
+        await manager.collect(ctx, timeout_s=0.2)
+
+        self.assertNotIn("resolver_hook_calls", ctx.state)
+        self.assertEqual(len(ctx.candidates), 1)
+        self.assertIsNotNone(ctx.candidates[0].answer)
+        self.assertEqual(
+            ctx.candidates[0].answer.response.question[0].rdclass,
+            dns.rdataclass.CH,
+        )
+        self.assertEqual(ctx.candidates[0].answer.response.rcode(), dns.rcode.NOERROR)
+        self.assertNotIn("hooked", ctx.candidates[0].answer.tags)
+
+    async def test_answer_tags_should_copy_context_tags(self) -> None:
+        self.ctx.tags = {"cn", "default"}
+        manager = ResolverManager(
+            resolvers=[
+                _SleepResolver(
+                    "good",
+                    delay_s=0.01,
+                    answer=Answer.from_query(self.ctx.query, rcode=dns.rcode.NOERROR),
+                ),
+            ]
+        )
+
+        await manager.collect(self.ctx, timeout_s=0.2)
+
+        self.assertEqual(len(self.ctx.candidates), 1)
+        self.assertIsNotNone(self.ctx.candidates[0].answer)
+        self.assertEqual(self.ctx.candidates[0].answer.tags, {"cn", "default"})
 
     async def test_non_a_returns_first_normal(self) -> None:
         ctx = self._new_ctx(dns.rdatatype.TXT)

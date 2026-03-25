@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import time
 
+import dns.opcode
 import dns.rcode
+import dns.rdataclass
 import dns.rdatatype
 
 from core.context import QueryContext
@@ -161,6 +163,16 @@ class ResolverManager:
         result: ResolverResult,
     ) -> ResolverResult | None:
         current: ResolverResult | None = result
+        reason = _resolver_hook_skip_reason(current)
+        if reason is not None:
+            logger.debug(
+                "resolver hook跳过 resolver=%s qname=%s qtype=%s reason=%s",
+                result.resolver_name,
+                ctx.query.qname.to_text(),
+                ctx.query.qtype,
+                reason,
+            )
+            return current
         for hook in self.resolver_hooks:
             if current is None:
                 return None
@@ -201,3 +213,19 @@ def _is_normal_result(result: ResolverResult) -> bool:
         and result.answer is not None
         and result.answer.response.rcode() == dns.rcode.NOERROR
     )
+
+
+def _resolver_hook_skip_reason(result: ResolverResult) -> str | None:
+    if result.error is not None or result.answer is None:
+        return "answer_or_error"
+
+    response = result.answer.response
+    if response.rcode() != dns.rcode.NOERROR:
+        return "non_noerror"
+    if response.opcode() != dns.opcode.QUERY:
+        return "invalid_opcode"
+    if not response.question:
+        return "missing_question"
+    if response.question[0].rdclass != dns.rdataclass.IN:
+        return "invalid_qclass"
+    return None

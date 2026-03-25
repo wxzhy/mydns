@@ -106,13 +106,14 @@ class TestConfig(unittest.TestCase):
         self.assertAlmostEqual(hook.timeout_s, 0.3)
         self.assertEqual(get_probe_cache_config(), (10000, 3600.0))
 
-    def test_tagset_hook_should_load_before_speedcheck(self) -> None:
+    def test_tagset_hook_should_load_when_declared_manually(self) -> None:
         content = """
         domainset:
           ads:
             - ads.txt
         hooks:
           resolver:
+            - class: plugins.tagset.TagSetResolverHook
             - class: plugins.speedcheck.SpeedCheckResolverHook
         """
         with tempfile.TemporaryDirectory(prefix="mydns-tagset-order-") as td:
@@ -249,7 +250,18 @@ class TestConfig(unittest.TestCase):
                       office:
                         - ips.txt
                     ip_rules:
-                      office: remove
+                      rules:
+                        - match_tags: [cn]
+                          A:
+                            replacements:
+                              - tag: office
+                                ip: 203.0.113.10
+                    hooks:
+                      request:
+                        - class: plugins.domain_rule.DomainRuleRequestHook
+                      resolver:
+                        - class: plugins.tagset.TagSetResolverHook
+                        - class: plugins.ip_rule.IPRuleResolverHook
                     """
                 ),
                 encoding="utf-8",
@@ -259,6 +271,7 @@ class TestConfig(unittest.TestCase):
             self.assertIsInstance(runtime.pipeline.request_hooks[0], DomainRuleRequestHook)
             hook = runtime.pipeline.request_hooks[0]
             self.assertIn("cn", hook.domainset_by_tag)
+            self.assertTrue(hook.rules)
             self.assertTrue(
                 any(
                     isinstance(item, IPRuleResolverHook)
@@ -266,7 +279,7 @@ class TestConfig(unittest.TestCase):
                 )
             )
 
-    def test_domain_rule_hook_should_load_after_cache(self) -> None:
+    def test_domain_rule_hook_should_load_after_cache_when_declared_manually(self) -> None:
         with tempfile.TemporaryDirectory(prefix="mydns-domain-rule-order-") as td:
             base = Path(td)
             (base / "domains.txt").write_text("example.cn\n", encoding="utf-8")
@@ -282,6 +295,7 @@ class TestConfig(unittest.TestCase):
                     hooks:
                       request:
                         - class: plugins.cache.CacheHook
+                        - class: plugins.domain_rule.DomainRuleRequestHook
                         - plugins.builtin.NoopRequestHook
                     """
                 ),
@@ -294,39 +308,108 @@ class TestConfig(unittest.TestCase):
         self.assertIsInstance(runtime.pipeline.request_hooks[1], DomainRuleRequestHook)
         self.assertIsInstance(runtime.pipeline.request_hooks[2], NoopRequestHook)
 
-    def test_ip_rule_hook_should_load_before_speedcheck(self) -> None:
+    def test_ip_rule_hook_should_load_after_tagset_and_before_speedcheck(self) -> None:
         content = """
+        domainset:
+          cn:
+            - domains.txt
         ipset:
-          telegram:
-            - telegram.txt
+          office:
+            - ips.txt
         ip_rules:
-          telegram:
-            action: replace
-            A: 203.0.113.10
+          rules:
+            - match_tags: [cn]
+              A:
+                replacements:
+                  - tag: office
+                    ip: 203.0.113.10
         hooks:
           resolver:
+            - class: plugins.tagset.TagSetResolverHook
+            - class: plugins.ip_rule.IPRuleResolverHook
             - class: plugins.speedcheck.SpeedCheckResolverHook
         """
         with tempfile.TemporaryDirectory(prefix="mydns-ip-rule-") as td:
             base = Path(td)
-            (base / "telegram.txt").write_text("1.1.1.0/24\n", encoding="utf-8")
+            (base / "domains.txt").write_text("example.cn\n", encoding="utf-8")
+            (base / "ips.txt").write_text("10.0.0.0/8\n", encoding="utf-8")
             path = base / "mydns.yaml"
             path.write_text(textwrap.dedent(content), encoding="utf-8")
             runtime = load_runtime_config(path)
 
         self.assertIsInstance(
             runtime.pipeline.resolver_manager.resolver_hooks[0],
-            IPRuleResolverHook,
+            TagSetResolverHook,
         )
         self.assertIsInstance(
             runtime.pipeline.resolver_manager.resolver_hooks[1],
+            IPRuleResolverHook,
+        )
+        self.assertIsInstance(
+            runtime.pipeline.resolver_manager.resolver_hooks[2],
             SpeedCheckResolverHook,
         )
 
+    def test_domain_rule_should_require_manual_hook(self) -> None:
+        raw = {
+            "domainset": {
+                "cn": ["domains.txt"],
+            },
+            "domain_rules": {
+                "cn": "intercept",
+            },
+        }
+
+        with tempfile.TemporaryDirectory(prefix="mydns-domain-rule-required-") as td:
+            base = Path(td)
+            (base / "domains.txt").write_text("example.cn\n", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                build_runtime_config(raw, base_dir=base)
+
+    def test_ip_rule_should_require_manual_hook(self) -> None:
+        raw = {
+            "domainset": {
+                "cn": ["domains.txt"],
+            },
+            "ipset": {
+                "office": ["ips.txt"],
+            },
+            "ip_rules": {
+                "rules": [
+                    {
+                        "match_tags": ["cn"],
+                        "A": {
+                            "replacements": [
+                                {
+                                    "tag": "office",
+                                    "ip": "203.0.113.10",
+                                }
+                            ]
+                        },
+                    }
+                ]
+            },
+            "hooks": {
+                "resolver": [
+                    "plugins.tagset.TagSetResolverHook",
+                ]
+            },
+        }
+
+        with tempfile.TemporaryDirectory(prefix="mydns-ip-rule-required-") as td:
+            base = Path(td)
+            (base / "domains.txt").write_text("example.cn\n", encoding="utf-8")
+            (base / "ips.txt").write_text("10.0.0.0/8\n", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                build_runtime_config(raw, base_dir=base)
+
     def test_ip_rule_hook_after_speedcheck_should_raise(self) -> None:
         raw = {
+            "domainset": {
+                "cn": ["domains.txt"],
+            },
             "ipset": {
-                "telegram": ["telegram.txt"],
+                "office": ["ips.txt"],
             },
             "hooks": {
                 "resolver": [
@@ -334,21 +417,107 @@ class TestConfig(unittest.TestCase):
                     {
                         "class": "plugins.ip_rule.IPRuleResolverHook",
                         "kwargs": {
-                            "rules": {
-                                "telegram": {
-                                    "action": "replace",
-                                    "A": "203.0.113.10",
-                                },
-                            }
+                            "rules": [
+                                {
+                                    "match_tags": ["cn"],
+                                    "A": {
+                                        "replacements": [
+                                            {
+                                                "tag": "office",
+                                                "ip": "203.0.113.10",
+                                            }
+                                        ]
+                                    },
+                                }
+                            ]
                         },
                     },
                 ]
             }
         }
 
-        with tempfile.TemporaryDirectory(prefix="mydns-ip-rule-order-") as td:
+        with tempfile.TemporaryDirectory(prefix="mydns-ip-rule-speedcheck-order-") as td:
             base = Path(td)
-            (base / "telegram.txt").write_text("1.1.1.0/24\n", encoding="utf-8")
+            (base / "domains.txt").write_text("example.cn\n", encoding="utf-8")
+            (base / "ips.txt").write_text("10.0.0.0/8\n", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                build_runtime_config(raw, base_dir=base)
+
+    def test_ip_rule_should_validate_replacement_ip_tags(self) -> None:
+        raw = {
+            "domainset": {
+                "cn": ["domains.txt"],
+            },
+            "ipset": {
+                "office": ["ips.txt"],
+            },
+            "ip_rules": {
+                "rules": [
+                    {
+                        "match_tags": ["cn"],
+                        "A": {
+                            "replacements": [
+                                {
+                                    "tag": "telegram",
+                                    "ip": "203.0.113.10",
+                                }
+                            ]
+                        },
+                    }
+                ]
+            },
+            "hooks": {
+                "resolver": [
+                    "plugins.tagset.TagSetResolverHook",
+                    "plugins.ip_rule.IPRuleResolverHook",
+                ]
+            },
+        }
+
+        with tempfile.TemporaryDirectory(prefix="mydns-ip-rule-iptag-") as td:
+            base = Path(td)
+            (base / "domains.txt").write_text("example.cn\n", encoding="utf-8")
+            (base / "ips.txt").write_text("10.0.0.0/8\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "未定义的 IP tag"):
+                build_runtime_config(raw, base_dir=base)
+
+    def test_ip_rule_hook_before_tagset_should_raise(self) -> None:
+        raw = {
+            "domainset": {
+                "cn": ["domains.txt"],
+            },
+            "ipset": {
+                "office": ["ips.txt"],
+            },
+            "hooks": {
+                "resolver": [
+                    {
+                        "class": "plugins.ip_rule.IPRuleResolverHook",
+                        "kwargs": {
+                            "rules": [
+                                {
+                                    "match_tags": ["cn"],
+                                    "A": {
+                                        "replacements": [
+                                            {
+                                                "tag": "office",
+                                                "ip": "203.0.113.10",
+                                            }
+                                        ]
+                                    },
+                                }
+                            ]
+                        },
+                    },
+                    "plugins.tagset.TagSetResolverHook",
+                ]
+            },
+        }
+
+        with tempfile.TemporaryDirectory(prefix="mydns-ip-rule-tagset-order-") as td:
+            base = Path(td)
+            (base / "domains.txt").write_text("example.cn\n", encoding="utf-8")
+            (base / "ips.txt").write_text("10.0.0.0/8\n", encoding="utf-8")
             with self.assertRaises(ValueError):
                 build_runtime_config(raw, base_dir=base)
 

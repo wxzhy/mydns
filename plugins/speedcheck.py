@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Awaitable, Callable
 
 import dns.rcode
@@ -10,9 +11,8 @@ import dns.name
 import dns.rdata
 import dns.rdataclass
 import dns.rdatatype
-import dns.resolver
 import dns.rrset
-import time
+
 from core.answer import Answer
 from core.context import QueryContext
 from core.hooks import ResolverHook, ResponseHook
@@ -47,45 +47,30 @@ class SpeedCheckResolverHook(ResolverHook):
         result: ResolverResult,
     ) -> ResolverResult | None:
         qname_text = ctx.query.qname.to_text()
-        if result.answer is None or result.error is not None:
-            logger.debug(
-                "测速跳过 resolver=%s reason=answer_or_error answer=%s error=%s",
-                result.resolver_name,
-                result.answer is not None,
-                repr(result.error) if result.error else None,
-            )
+        answer = result.answer
+        if _should_skip_speedcheck(result):
+            _log_skip_speedcheck(ctx, result, reason="answer_or_error")
             return result
-        if "ads" in result.answer.tags:
+
+        assert answer is not None
+        if "ads" in answer.tags:
             logger.debug(
                 "测速跳过 resolver=%s qname=%s reason=ads_tagged tags=%s",
                 result.resolver_name,
                 qname_text,
-                sorted(result.answer.tags),
-            )
-            return result
-        if ctx.query.qtype not in {dns.rdatatype.A, dns.rdatatype.AAAA}:
-            logger.debug(
-                "测速跳过 resolver=%s qtype=%s reason=unsupported_qtype",
-                result.resolver_name,
-                ctx.query.qtype,
+                sorted(answer.tags),
             )
             return result
 
-        # 统一从 Answer.rrset 读取 IP 候选，避免扫描 response.answer 的冗余逻辑。
-        ips = _extract_ips(result.answer, qtype=ctx.query.qtype)
+        # 只测速最终可返回的 A/AAAA rrset，不扫描整个 response.answer。
+        ips = _extract_ips(answer)
         if not ips:
-            logger.debug(
-                "测速跳过 resolver=%s qname=%s qtype=%s reason=no_ip_rrset",
-                result.resolver_name,
-                qname_text,
-                ctx.query.qtype,
-            )
+            _log_skip_speedcheck(ctx, result, reason="no_ip_rrset")
             return result
 
-        # 单个请求内的测速结果统一记录在 ctx.ip_list 中。
+        # 单个请求范围内做去重缓存，避免多个 resolver 对同一 IP 重复测速。
         ctx.ip_list.ips.update(ips)
         pending = [ip for ip in ips if ip not in ctx.ip_list.results]
-        tested: dict[str, float | None] = {}
         logger.debug(
             "测速准备 resolver=%s qname=%s qtype=%s ips=%s pending=%s cached=%s",
             result.resolver_name,
@@ -95,36 +80,10 @@ class SpeedCheckResolverHook(ResolverHook):
             pending,
             ctx.ip_list.results,
         )
-        if pending:
-            try:
-                tested = await asyncio.wait_for(
-                    self.probe_func(pending, self.timeout_s),
-                    timeout=self.timeout_s,
-                )
-            except TimeoutError:
-                tested = {ip: None for ip in pending}
-                logger.debug(
-                    "测速超时 resolver=%s qname=%s qtype=%s pending=%s timeout=%.3fs",
-                    result.resolver_name,
-                    qname_text,
-                    ctx.query.qtype,
-                    pending,
-                    self.timeout_s,
-                )
-            except Exception as exc:
-                tested = {ip: None for ip in pending}
-                logger.debug(
-                    "测速异常 resolver=%s qname=%s qtype=%s pending=%s err=%r",
-                    result.resolver_name,
-                    qname_text,
-                    ctx.query.qtype,
-                    pending,
-                    exc,
-                )
-            for ip, rtt in tested.items():
-                ctx.ip_list.results[ip] = rtt
+        tested = await self._probe_pending_ips(ctx, result, pending)
+        for ip, rtt in tested.items():
+            ctx.ip_list.results[ip] = rtt
 
-        # 日志里保留本次真实发起测速的 IP，便于定位重复去重效果。
         logger.debug(
             "测速完成 resolver=%s qname=%s qtype=%s ips=%s pending=%s rtt=%s cache=%s",
             result.resolver_name,
@@ -136,6 +95,40 @@ class SpeedCheckResolverHook(ResolverHook):
             ctx.ip_list.results,
         )
         return result
+
+    async def _probe_pending_ips(
+        self,
+        ctx: QueryContext,
+        result: ResolverResult,
+        pending: list[str],
+    ) -> dict[str, float | None]:
+        if not pending:
+            return {}
+
+        try:
+            return await asyncio.wait_for(
+                self.probe_func(pending, self.timeout_s),
+                timeout=self.timeout_s,
+            )
+        except TimeoutError:
+            logger.debug(
+                "测速超时 resolver=%s qname=%s qtype=%s pending=%s timeout=%.3fs",
+                result.resolver_name,
+                ctx.query.qname.to_text(),
+                ctx.query.qtype,
+                pending,
+                self.timeout_s,
+            )
+        except Exception as exc:
+            logger.debug(
+                "测速异常 resolver=%s qname=%s qtype=%s pending=%s err=%r",
+                result.resolver_name,
+                ctx.query.qname.to_text(),
+                ctx.query.qtype,
+                pending,
+                exc,
+            )
+        return {ip: None for ip in pending}
 
 
 class RewriteAnswerByRTTHook(ResponseHook):
@@ -162,36 +155,23 @@ class RewriteAnswerByRTTHook(ResponseHook):
 
         answer = ctx.final_answer
         if answer is None:
-            logger.debug(
-                "响应改写跳过 qname=%s reason=no_final_answer",
-                qname_text,
-            )
+            _log_skip_rewrite(ctx, reason="no_final_answer")
             return
         assert isinstance(answer, Answer)
         if answer.response.rcode() != dns.rcode.NOERROR:
-            logger.debug(
-                "响应改写跳过 qname=%s qtype=%s reason=rcode_not_noerror rcode=%s",
-                qname_text,
-                ctx.query.qtype,
-                answer.response.rcode(),
+            _log_skip_rewrite(
+                ctx,
+                reason="rcode_not_noerror",
+                extra=f"rcode={answer.response.rcode()}",
             )
             return
         if ctx.query.qtype not in {dns.rdatatype.A, dns.rdatatype.AAAA}:
-            logger.debug(
-                "响应改写跳过 qname=%s qtype=%s reason=unsupported_qtype",
-                qname_text,
-                ctx.query.qtype,
-            )
+            _log_skip_rewrite(ctx, reason="unsupported_qtype")
             return
 
-        # 仅使用已有测速结果（None 表示失败/超时）参与排序。
         ip_rtt = {ip: rtt for ip, rtt in ctx.ip_list.results.items() if rtt is not None}
         if not ip_rtt:
-            logger.debug(
-                "响应改写跳过 qname=%s qtype=%s reason=no_rtt_data",
-                qname_text,
-                ctx.query.qtype,
-            )
+            _log_skip_rewrite(ctx, reason="no_rtt_data")
             return
 
         ranked_ips = [ip for ip, _ in sorted(ip_rtt.items(), key=lambda item: item[1])]
@@ -205,8 +185,7 @@ class RewriteAnswerByRTTHook(ResponseHook):
         if not selected_ips:
             return
 
-        # `chaining_result` 与 `rrset` 在 Answer 中是独立部分：
-        # 这里只替换 rrset，CNAME 链保持由 chaining_result 负责。
+        # `Answer` 中的 CNAME 链与最终地址 rrset 分开存储，这里只替换地址部分。
         rewritten = _build_ip_rrset(
             owner_name=owner_name,
             rdclass=answer.rdclass,
@@ -231,14 +210,46 @@ class RewriteAnswerByRTTHook(ResponseHook):
         )
 
 
+def _should_skip_speedcheck(result: ResolverResult) -> bool:
+    return result.answer is None or result.error is not None
+
+
+def _log_skip_speedcheck(
+    ctx: QueryContext,
+    result: ResolverResult,
+    *,
+    reason: str,
+) -> None:
+    logger.debug(
+        "测速跳过 resolver=%s qname=%s qtype=%s reason=%s answer=%s error=%s",
+        result.resolver_name,
+        ctx.query.qname.to_text(),
+        ctx.query.qtype,
+        reason,
+        result.answer is not None,
+        repr(result.error) if result.error else None,
+    )
+
+
+def _log_skip_rewrite(
+    ctx: QueryContext,
+    *,
+    reason: str,
+    extra: str | None = None,
+) -> None:
+    message = "响应改写跳过 qname=%s qtype=%s reason=%s"
+    args: list[object] = [ctx.query.qname.to_text(), ctx.query.qtype, reason]
+    if extra is not None:
+        message += " " + extra
+    logger.debug(message, *args)
+
+
 def _extract_ips(
     answer: Answer,
-    *,
-    qtype: dns.rdatatype.RdataType,
 ) -> list[str]:
     """从 Answer.rrset 提取 A/AAAA 地址，保持原顺序并去重。"""
     rrset = answer.rrset
-    if rrset is None or rrset.rdtype != qtype:
+    if rrset is None or rrset.rdtype not in {dns.rdatatype.A, dns.rdatatype.AAAA}:
         return []
 
     ips: list[str] = []

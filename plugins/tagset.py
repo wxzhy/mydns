@@ -36,17 +36,9 @@ class TagSetResolverHook(ResolverHook):
         if answer is None or result.error is not None:
             return result
 
-        answer.tags.update(ctx.tags)
-        matched_tags = _match_cname_tags(answer)
+        matched_tags = _merge_cname_tags(answer)
         if matched_tags:
-            answer.tags.update(matched_tags)
-            logger.debug(
-                "CNAME标签命中 resolver=%s qname=%s matched=%s tags=%s",
-                result.resolver_name,
-                ctx.query.qname.to_text(),
-                sorted(matched_tags),
-                sorted(answer.tags),
-            )
+            _log_cname_tag_match(ctx, result, matched_tags)
 
         if _ADS_TAG not in answer.tags:
             return result
@@ -61,6 +53,14 @@ class TagSetResolverHook(ResolverHook):
             len(result.answer.response.answer),
         )
         return result
+
+
+def _merge_cname_tags(answer: Answer) -> set[str]:
+    """扫描 CNAME 链，把命中的 domainset tag 合并进 answer.tags。"""
+    matched_tags = _match_cname_tags(answer)
+    if matched_tags:
+        answer.tags.update(matched_tags)
+    return matched_tags
 
 
 def _match_cname_tags(answer: Answer) -> set[str]:
@@ -79,13 +79,29 @@ def _match_cname_tags(answer: Answer) -> set[str]:
     return matched_tags
 
 
+def _log_cname_tag_match(
+    ctx: QueryContext,
+    result: ResolverResult,
+    matched_tags: set[str],
+) -> None:
+    logger.debug(
+        "CNAME标签命中 resolver=%s qname=%s matched=%s tags=%s",
+        result.resolver_name,
+        ctx.query.qname.to_text(),
+        sorted(matched_tags),
+        sorted(result.answer.tags) if result.answer is not None else [],
+    )
+
+
 def _build_blocked_answer(ctx: QueryContext, answer: Answer) -> Answer:
     if ctx.query.qtype in {dns.rdatatype.A, dns.rdatatype.AAAA}:
+        # 地址查询直接回本地回环地址，保留已有 CNAME 链和其他元信息。
         rrset = _build_localhost_rrset(answer, qtype=ctx.query.qtype)
         answer.set_rcode(dns.rcode.NOERROR, update_message=False)
         answer.replace_rrset(rrset, preserve_expiration=answer.expiration)
         return answer
 
+    # 非地址查询返回空 NOERROR，避免继续泄露真实记录。
     return Answer.from_query(
         ctx.query,
         rcode=dns.rcode.NOERROR,

@@ -41,7 +41,11 @@ def _make_cname_a_answer(ip: str) -> Answer:
         "tracker.ads.example.",
     )
     rrset = dns.rrset.from_text("tracker.ads.example.", 60, "IN", "A", ip)
-    return Answer.from_query(_make_query(dns.rdatatype.A), rrsets=[cname, rrset])
+    return Answer.from_query(
+        _make_query(dns.rdatatype.A),
+        rrsets=[cname, rrset],
+        tags={"default"},
+    )
 
 
 class TestTagSetResolverHook(unittest.IsolatedAsyncioTestCase):
@@ -101,7 +105,11 @@ class TestTagSetResolverHook(unittest.IsolatedAsyncioTestCase):
                 )
                 result = ResolverResult(
                     resolver_name="r1",
-                    answer=Answer.from_query(ctx.query, rrsets=[cname, txt]),
+                    answer=Answer.from_query(
+                        ctx.query,
+                        rrsets=[cname, txt],
+                        tags={"default"},
+                    ),
                     elapsed_ms=5.0,
                 )
 

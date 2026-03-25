@@ -48,29 +48,37 @@ class CacheHook(RequestHook, ResponseHook):
 
     async def on_request(self, ctx: QueryContext) -> None:
         key = build_cache_key(ctx.query)
-        answer = self.cache.get(key)
         ctx.state["cache_key"] = key
+        answer = self.cache.get(key)
         if answer is None:
-            ctx.state["cache_hit"] = False
-            pending, future = await self.cache.acquire_pending(key)
-            ctx.state["cache_pending_request"] = pending
-            if pending.owner:
-                return
-            waited = await future
-            ctx.state["cache_wait"] = True
-            ctx.final_answer = Answer.from_answer(waited)
-            ctx.stop = True
-            logger.debug(
-                "等待同 key 请求完成 qname=%s qtype=%s",
-                ctx.query.qname.to_text(),
-                ctx.query.qtype,
-            )
+            await self._handle_cache_miss(ctx, key)
             return
+
+        # 命中后直接复用缓存答案，不再进入后续转发。
         ctx.state["cache_hit"] = True
         ctx.final_answer = answer
         ctx.stop = True
         logger.debug(
             "缓存命中 qname=%s qtype=%s",
+            ctx.query.qname.to_text(),
+            ctx.query.qtype,
+        )
+
+    async def _handle_cache_miss(self, ctx: QueryContext, key: str) -> None:
+        ctx.state["cache_hit"] = False
+        pending, future = await self.cache.acquire_pending(key)
+        ctx.state["cache_pending_request"] = pending
+        if pending.owner:
+            # owner 请求继续向后执行，由响应阶段负责写回缓存。
+            return
+
+        # 非 owner 请求等待共享结果，避免并发击穿同一个上游查询。
+        waited = await future
+        ctx.state["cache_wait"] = True
+        ctx.final_answer = Answer.from_answer(waited)
+        ctx.stop = True
+        logger.debug(
+            "等待同 key 请求完成 qname=%s qtype=%s",
             ctx.query.qname.to_text(),
             ctx.query.qtype,
         )
@@ -84,6 +92,7 @@ class CacheHook(RequestHook, ResponseHook):
         rcode = answer.response.rcode()
         if rcode not in self.cacheable_rcodes:
             return
+
         key = ctx.state.get("cache_key")
         if key is None:
             key = build_cache_key(ctx.query)

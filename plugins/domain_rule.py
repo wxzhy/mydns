@@ -46,16 +46,15 @@ class DomainRuleRequestHook(RequestHook):
 
     async def on_request(self, ctx: QueryContext) -> None:
         qname_text = ctx.query.qname.to_text().rstrip(".").lower()
-        # 规则匹配只依赖 domainset，不考虑 client ip。
         matched_tags = domainset.match_tags(qname_text)
         if not matched_tags:
             return
 
-        ctx.tags.discard("default")
-        ctx.tags.update(matched_tags)
+        # 请求阶段只看域名命中的 domainset，不混入 client IP 等额外条件。
+        _merge_request_tags(ctx, matched_tags)
 
-        selected = _select_domain_rule(matched_tags, self.rules)
-        if selected is None:
+        matched_rule = _select_domain_rule(matched_tags, self.rules)
+        if matched_rule is None:
             logger.debug(
                 "域名标签命中 qname=%s tags=%s",
                 qname_text,
@@ -63,7 +62,7 @@ class DomainRuleRequestHook(RequestHook):
             )
             return
 
-        tag, rule = selected
+        tag, rule = matched_rule
         answer = _build_domain_rule_answer(ctx, rule)
         if answer is None:
             logger.debug(
@@ -86,6 +85,12 @@ class DomainRuleRequestHook(RequestHook):
             rule.action,
             sorted(ctx.tags),
         )
+
+
+def _merge_request_tags(ctx: QueryContext, matched_tags: set[str]) -> None:
+    """domain_rules 命中后，使用命中标签替换默认标签集合。"""
+    ctx.tags.discard("default")
+    ctx.tags.update(matched_tags)
 
 
 def _normalize_domain_rules(
@@ -217,26 +222,12 @@ def _build_domain_rule_answer(
     if rule.action == "intercept":
         return _build_intercept_answer(ctx, ttl_s=rule.ttl_s)
     if rule.action == "hosts":
-        records = rule.records.get(ctx.query.qtype)
-        if not records:
-            return None
-        rrset = _build_ip_rrset(
-            owner_name=ctx.query.qname,
-            rdclass=dns.rdataclass.IN,
-            qtype=ctx.query.qtype,
-            ips=list(records),
-            ttl_s=rule.ttl_s,
-        )
-        return Answer.from_query(
-            ctx.query,
-            rcode=dns.rcode.NOERROR,
-            rrsets=[rrset],
-            tags=ctx.tags,
-        )
+        return _build_hosts_answer(ctx, rule)
     return None
 
 
 def _build_intercept_answer(ctx: QueryContext, *, ttl_s: int) -> Answer:
+    # intercept 只对 A/AAAA 回本地回环地址；其他类型返回空 NOERROR。
     if ctx.query.qtype == dns.rdatatype.A:
         rrset = dns.rrset.from_text(
             ctx.query.qname.to_text(),
@@ -266,6 +257,26 @@ def _build_intercept_answer(ctx: QueryContext, *, ttl_s: int) -> Answer:
             tags=ctx.tags,
         )
     return Answer.from_query(ctx.query, rcode=dns.rcode.NOERROR, tags=ctx.tags)
+
+
+def _build_hosts_answer(ctx: QueryContext, rule: _DomainRule) -> Answer | None:
+    records = rule.records.get(ctx.query.qtype)
+    if not records:
+        return None
+
+    rrset = _build_ip_rrset(
+        owner_name=ctx.query.qname,
+        rdclass=dns.rdataclass.IN,
+        qtype=ctx.query.qtype,
+        ips=list(records),
+        ttl_s=rule.ttl_s,
+    )
+    return Answer.from_query(
+        ctx.query,
+        rcode=dns.rcode.NOERROR,
+        rrsets=[rrset],
+        tags=ctx.tags,
+    )
 
 
 def _build_ip_rrset(

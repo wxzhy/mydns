@@ -30,6 +30,7 @@ ipset:
     - rules/geoip/telegram.list
 
 # 按命中的 domainset tag 执行动作，并同步更新 ctx.tags。
+# 仅在 hooks.request 中显式声明 plugins.domain_rule.DomainRuleRequestHook 时生效。
 # action:
 #   intercept: A/AAAA 返回 localhost，TTL 为 1d；其他类型返回空 NOERROR
 #   hosts: A/AAAA 返回指定 IP，不转发；其他类型继续转发
@@ -41,21 +42,44 @@ domain_rules:
     A: 192.168.1.10
     AAAA: "fd00::10"
 
-# 按命中的 ipset tag 改写上游返回的 A/AAAA 地址。
-# action:
-#   replace: 直接替换成指定 IP
-#   replace_prefix: 用目标前缀替换源 IP 的网络前缀，保留主机位
-#   remove: 删除该 IP
+# plugins.ip_rule.IPRuleResolverHook 的规则配置。
+# 仅在 hooks.resolver 中显式声明该插件时生效。
+# 执行流程：
+# 1. 先用 answer.tags 与 rules[*].match_tags 匹配第一条命中的规则
+# 2. 再对上游返回的每个 A/AAAA 源 IP，按 replacement.tag 匹配 ipset tag
+# 3. 命中后替换为 replacement.ip；未命中的源 IP 保持原样；最终按顺序去重
+# replacement 字段说明：
+#   tag: 该源 IP 需要命中的 ipset tag
+#   ip: 替换使用的目标 IP / 前缀
+#   preserve_prefix_len:
+#     可选，保留目标 IP 的前缀位，并从当前源 IP 继承剩余后缀位。
 ip_rules:
-  telegram:
-    action: replace
-    A: 203.0.113.10
-    AAAA: "2001:db8::10"
-  cn:
-    action: replace_prefix
-    A: 198.18.0.0/15
-  private:
-    action: remove
+  skip_result_tags: [ads]
+  rules:
+    - match_tags: [cn]
+      A:
+        replacements:
+          - tag: cn
+            ip: 198.18.0.10
+            preserve_prefix_len: 24
+          - tag: private
+            ip: 192.168.1.10
+      AAAA:
+        replacements:
+          - tag: cn
+            ip: "2001:db8:100::10"
+            preserve_prefix_len: 64
+          - tag: private
+            ip: "fd00::10"
+    - match_tags: [private]
+      A:
+        replacements:
+          - tag: private
+            ip: 192.168.1.10
+      AAAA:
+        replacements:
+          - tag: private
+            ip: "fd00::10"
 
 resolvers:
   # 已移除冗余参数：source/source_port/http_version/ssl_context/family/post
@@ -137,6 +161,9 @@ hooks:
   # 当前内置插件示例：
   # - plugins.builtin.NoopRequestHook / NoopResolverHook / NoopResponseHook
   # - plugins.cache.CacheHook
+  # - plugins.domain_rule.DomainRuleRequestHook
+  # - plugins.tagset.TagSetResolverHook
+  # - plugins.ip_rule.IPRuleResolverHook
   # - plugins.speedcheck.SpeedCheckResolverHook
   # - plugins.speedcheck.RewriteAnswerByRTTHook
   request:
@@ -150,15 +177,25 @@ hooks:
         max_size: 100000
         # 默认只缓存 NOERROR(0)；如需同时缓存 NXDOMAIN，可改为 [0, 3]
         # cacheable_rcodes: [0, 3]
-    # domain_rules 对应的 hook 会在这里自动插到 cache 之后。
+    # 显式启用 domain_rules；规则读取自顶层 domain_rules 配置。
+    - class: plugins.domain_rule.DomainRuleRequestHook
   resolver:
     # 简写：无参数上游结果插件
     - plugins.builtin.NoopResolverHook
-    # ip_rules 对应的 hook 会自动插在测速之前。
+    # 显式启用 CNAME tag 匹配与 uncloaking 过滤。
+    # resolver 返回后会先复制 ctx.tags 到 answer.tags；此 hook 再补充 CNAME 命中的结果标签。
+    - class: plugins.tagset.TagSetResolverHook
+    # 显式启用 IP 改写；规则读取自顶层 ip_rules 配置。
+    # 推荐放在 tagset 之后、speedcheck 之前：
+    # - tagset 先补充结果标签，供 match_tags 选中规则
+    # - ip_rule 再按每个返回 IP 的 ipset tag 逐条改写
+    # - speedcheck 最后只对改写后的地址测速
+    - class: plugins.ip_rule.IPRuleResolverHook
+    # 推荐顺序：tagset -> ip_rule -> speedcheck。
     # 完整写法：对 A/AAAA 候选 IP 执行测速，结果写入 ctx.ip_list
     - class: plugins.speedcheck.SpeedCheckResolverHook
       kwargs:
-        timeout_s: 0.8
+        timeout_s: 2
         max_size: 10000
         ttl_s: 3600
   response:

@@ -26,6 +26,7 @@ async def probe_ips(
     timeout_s: float,
 ) -> dict[str, float | None]:
     """并发测速多个 IP，返回每个 IP 的最佳 RTT（毫秒）。"""
+    # 同一轮测速里先按输入顺序去重，避免同一请求内重复发包。
     ip_list = list(dict.fromkeys(ips))
     probes = [probe_one_ip(ip, timeout_s=timeout_s) for ip in ip_list]
     raw_results = await asyncio.gather(*probes, return_exceptions=True)
@@ -40,31 +41,21 @@ async def probe_ips(
 
 
 def _decorate_probe_one_ip(func: Any) -> Any:
+    # `async_lru` 直接装饰单 IP 探测函数，缓存粒度就是 (ip, timeout_s)。
     return alru_cache(maxsize=_probe_cache_max_size, ttl=_probe_cache_ttl_s)(func)
 
 
 @_decorate_probe_one_ip
 async def probe_one_ip(ip: str, timeout_s: float) -> float | None:
     """针对单个 IP 并行测速，拿到首个成功 RTT 即返回。"""
-    tasks = [
-        asyncio.create_task(_probe_ping(ip, timeout_s)),
-        asyncio.create_task(_probe_tcp(ip, 80, timeout_s)),
-        asyncio.create_task(_probe_tcp(ip, 443, timeout_s)),
-    ]
+    tasks = _build_probe_tasks(ip, timeout_s)
 
     try:
-        for completed in asyncio.as_completed(tasks, timeout=timeout_s):
-            rtt = await completed
-            if rtt is not None:
-                return rtt
-        return None
+        return await _wait_first_success(tasks, timeout_s=timeout_s)
     except TimeoutError:
         return None
     finally:
-        for task in tasks:
-            if not task.done():
-                task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        await _close_probe_tasks(tasks)
 
 
 _RAW_PROBE_ONE_IP = probe_one_ip.__wrapped__
@@ -110,6 +101,7 @@ def _reset_probe_one_ip_cache() -> None:
     global probe_one_ip
 
     old_probe_one_ip = probe_one_ip
+    # 重新装饰函数是为了让 async-lru 读取新的 maxsize/ttl 配置。
     probe_one_ip = _decorate_probe_one_ip(_RAW_PROBE_ONE_IP)
     cache_clear = getattr(old_probe_one_ip, "cache_clear", None)
     if callable(cache_clear):
@@ -168,3 +160,31 @@ async def _probe_tcp(ip: str, port: int, timeout_s: float) -> float | None:
         return elapsed
     except Exception:
         return None
+
+
+def _build_probe_tasks(ip: str, timeout_s: float) -> list[asyncio.Task[float | None]]:
+    # 同时发起 ICMP 和常见 TCP 端口探测，优先返回最早成功的一项。
+    return [
+        asyncio.create_task(_probe_ping(ip, timeout_s)),
+        asyncio.create_task(_probe_tcp(ip, 80, timeout_s)),
+        asyncio.create_task(_probe_tcp(ip, 443, timeout_s)),
+    ]
+
+
+async def _wait_first_success(
+    tasks: list[asyncio.Task[float | None]],
+    *,
+    timeout_s: float,
+) -> float | None:
+    for completed in asyncio.as_completed(tasks, timeout=timeout_s):
+        rtt = await completed
+        if rtt is not None:
+            return rtt
+    return None
+
+
+async def _close_probe_tasks(tasks: list[asyncio.Task[float | None]]) -> None:
+    for task in tasks:
+        if not task.done():
+            task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
