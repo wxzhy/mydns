@@ -47,17 +47,7 @@ class IPSet:
             self.load_from_files(resolved, tag)
 
     def match(self, ip: str, tag: str) -> bool:
-        text = ip.strip()
-        if not text:
-            return False
-        try:
-            parsed = ip_address(text)
-        except Exception:
-            return False
-        rnode = self._tree.search_best(str(parsed))
-        if rnode is None:
-            return False
-        return rnode.data.get("data") == tag
+        return tag in self.match_tags(ip)
 
     def match_tags(self, ip: str) -> set[str]:
         text = ip.strip()
@@ -67,13 +57,13 @@ class IPSet:
             parsed = ip_address(text)
         except Exception:
             return set()
-        rnode = self._tree.search_best(str(parsed))
-        if rnode is None:
-            return set()
-        tag = rnode.data.get("data")
-        if isinstance(tag, str) and tag:
-            return {tag}
-        return set()
+        # 需要拿到所有覆盖当前 IP 的网段，而不只是最长前缀匹配。
+        matched: set[str] = set()
+        for rnode in self._tree.search_covering(str(parsed)):
+            tag = rnode.data.get("data")
+            if isinstance(tag, str) and tag:
+                matched.add(tag)
+        return matched
 
     @property
     def tags(self) -> set[str]:

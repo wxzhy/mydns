@@ -66,18 +66,23 @@ class TestIPSet(unittest.TestCase):
             base = Path(td)
             p1 = base / "ips1.txt"
             p2 = base / "ips2.txt"
+            p3 = base / "ips3.txt"
             p1.write_text("10.0.0.0/8\n", encoding="utf-8")
             p2.write_text("240e::/20\n", encoding="utf-8")
+            p3.write_text("10.2.0.0/16\n", encoding="utf-8")
 
             ipset = IPSet()
             ipset.load_from_file(p1, tag="cn")
             ipset.load_from_file(p2, tag="office")
+            ipset.load_from_file(p3, tag="telegram")
 
             self.assertTrue(ipset.match("10.12.0.1", "cn"))
             self.assertTrue(ipset.match("240e::1", "office"))
+            self.assertTrue(ipset.match("10.2.3.4", "cn"))
+            self.assertTrue(ipset.match("10.2.3.4", "telegram"))
             self.assertFalse(ipset.match("10.12.0.1", "office"))
             self.assertFalse(ipset.match("8.8.8.8", "cn"))
-            self.assertEqual(ipset.match_tags("10.2.3.4"), {"cn"})
+            self.assertEqual(ipset.match_tags("10.2.3.4"), {"cn", "telegram"})
             self.assertEqual(ipset.match_tags("240e::9"), {"office"})
 
 

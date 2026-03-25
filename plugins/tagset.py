@@ -40,7 +40,9 @@ class TagSetRequestHook(RequestHook):
 
     async def on_request(self, ctx: QueryContext) -> None:
         qname_text = ctx.query.qname.to_text().rstrip(".").lower()
-        matched_tags = domainset.match_tags(qname_text)
+        domain_tags = domainset.match_tags(qname_text)
+        client_tags = _match_client_ip_tags(ctx)
+        matched_tags = domain_tags | client_tags
 
         if not matched_tags:
             return
@@ -48,7 +50,7 @@ class TagSetRequestHook(RequestHook):
         # 一旦命中专用 tag，就替换默认 default tag。
         ctx.tags.discard("default")
         ctx.tags.update(matched_tags)
-        if _ADS_TAG in matched_tags:
+        if _ADS_TAG in domain_tags:
             ctx.final_answer = _build_ads_answer(ctx)
             ctx.stop = True
             logger.debug(
@@ -66,6 +68,13 @@ class TagSetRequestHook(RequestHook):
             sorted(matched_tags),
             sorted(ctx.tags),
         )
+
+
+def _match_client_ip_tags(ctx: QueryContext) -> set[str]:
+    client_addr = ctx.query.client_addr
+    if client_addr is None:
+        return set()
+    return ipset.match_tags(client_addr[0])
 
 
 class RewriteByIPTagResolverHook(ResolverHook):
