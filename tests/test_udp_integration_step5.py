@@ -5,9 +5,12 @@ from __future__ import annotations
 import unittest
 
 import dns.asyncquery
+import dns.flags
 import dns.message
 import dns.name
+import dns.opcode
 import dns.rcode
+import dns.rdataclass
 import dns.rdatatype
 import dns.rrset
 
@@ -62,9 +65,66 @@ class TestUDPIntegrationStep5(unittest.IsolatedAsyncioTestCase):
             await server.stop()
 
         self.assertEqual(response.rcode(), dns.rcode.NOERROR)
+        self.assertTrue(response.flags & dns.flags.QR)
+        self.assertTrue(response.flags & dns.flags.RD)
+        self.assertTrue(response.flags & dns.flags.RA)
         types = [rrset.rdtype for rrset in response.answer]
         self.assertIn(dns.rdatatype.CNAME, types)
         self.assertIn(dns.rdatatype.A, types)
+
+    async def test_udp_non_in_query_should_return_refused(self) -> None:
+        pipeline = Pipeline(
+            resolvers=[_StaticResolver()],
+            response_hooks=[RewriteAnswerByRTTHook()],
+        )
+        server = UDPDNSServer(pipeline=pipeline, host="127.0.0.1", port=0)
+        await server.start()
+        try:
+            query = dns.message.make_query(
+                dns.name.from_text("www.example.com."),
+                dns.rdatatype.A,
+                dns.rdataclass.CH,
+            )
+            response = await dns.asyncquery.udp(
+                query,
+                where="127.0.0.1",
+                port=server.port,
+                timeout=1.0,
+            )
+        finally:
+            await server.stop()
+
+        self.assertEqual(response.rcode(), dns.rcode.REFUSED)
+        self.assertTrue(response.flags & dns.flags.QR)
+        self.assertTrue(response.flags & dns.flags.RD)
+        self.assertTrue(response.flags & dns.flags.RA)
+
+    async def test_udp_non_query_opcode_should_return_refused(self) -> None:
+        pipeline = Pipeline(
+            resolvers=[_StaticResolver()],
+            response_hooks=[RewriteAnswerByRTTHook()],
+        )
+        server = UDPDNSServer(pipeline=pipeline, host="127.0.0.1", port=0)
+        await server.start()
+        try:
+            query = dns.message.make_query(
+                dns.name.from_text("www.example.com."),
+                dns.rdatatype.A,
+            )
+            query.set_opcode(dns.opcode.STATUS)
+            response = await dns.asyncquery.udp(
+                query,
+                where="127.0.0.1",
+                port=server.port,
+                timeout=1.0,
+            )
+        finally:
+            await server.stop()
+
+        self.assertEqual(response.rcode(), dns.rcode.REFUSED)
+        self.assertTrue(response.flags & dns.flags.QR)
+        self.assertTrue(response.flags & dns.flags.RD)
+        self.assertTrue(response.flags & dns.flags.RA)
 
 
 if __name__ == "__main__":

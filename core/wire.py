@@ -8,11 +8,18 @@ import dns.edns
 import dns.exception
 import dns.flags
 import dns.message
+import dns.opcode
 import dns.rcode
+import dns.rdataclass
+import dns.rrset
 
 from core.answer import Answer, make_answer
 from core.context import QueryContext
 from core.models import Query
+
+
+class RefusedRequestError(dns.exception.DNSException):
+    """请求 opcode/qclass 不受支持时抛出，供 server 映射为 REFUSED。"""
 
 
 def parse_query_context(
@@ -24,6 +31,7 @@ def parse_query_context(
         raise dns.exception.DNSException("DNS 请求缺少 question")
 
     question = request.question[0]
+    _validate_request_message(request, question)
     ecs = _find_ecs_option(request.options)
     query = Query(
         client_addr=client_addr,
@@ -51,12 +59,12 @@ def build_error_response_wire(request_wire: bytes, rcode: dns.rcode.Rcode) -> by
     """在解析失败等场景下构造错误响应。"""
     try:
         request = dns.message.from_wire(request_wire, ignore_trailing=True)
-        response = dns.message.make_response(request)
+        response = Answer.ensure_response_flags(dns.message.make_response(request))
     except Exception:
         # 报文损坏时退化为最小响应，仅尽力回写事务 ID。
         txid = int.from_bytes(request_wire[:2], "big") if len(request_wire) >= 2 else 0
         response = dns.message.Message(id=txid)
-        response.flags |= dns.flags.QR
+        Answer.ensure_response_flags(response)
     response.set_rcode(rcode)
     return response.to_wire()
 
@@ -72,3 +80,17 @@ def _require_state_value(state: dict[str, Any], key: str) -> Any:
     if key not in state:
         raise KeyError(f"缺少上下文状态字段: {key}")
     return state[key]
+
+
+def _validate_request_message(
+    request: dns.message.Message,
+    question: dns.rrset.RRset,
+) -> None:
+    if request.opcode() != dns.opcode.QUERY:
+        raise RefusedRequestError(
+            f"不支持的 DNS opcode: {dns.opcode.to_text(request.opcode())}"
+        )
+    if question.rdclass != dns.rdataclass.IN:
+        raise RefusedRequestError(
+            f"不支持的 DNS qclass: {dns.rdataclass.to_text(question.rdclass)}"
+        )

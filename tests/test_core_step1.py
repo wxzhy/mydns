@@ -4,14 +4,19 @@ from __future__ import annotations
 
 import unittest
 
+import dns.flags
 import dns.name
+import dns.opcode
 import dns.rcode
+import dns.rdataclass
+import dns.message
 import dns.rdatatype
 
 from core.answer import Answer
 from core.context import QueryContext
 from core.hooks import RequestHook, ResolverHook, ResponseHook
 from core.models import Query, ResolverResult
+from core.wire import RefusedRequestError, build_error_response_wire, parse_query_context
 from resolver.resolver import Resolver
 
 
@@ -56,6 +61,38 @@ class TestCoreStep1(unittest.IsolatedAsyncioTestCase):
         answer = Answer.from_query(self.query, rcode=dns.rcode.NOERROR)
         self.assertEqual(answer.response.rcode(), dns.rcode.NOERROR)
         self.assertEqual(answer.response.answer, [])
+        self.assertTrue(answer.response.flags & dns.flags.QR)
+        self.assertTrue(answer.response.flags & dns.flags.RD)
+        self.assertTrue(answer.response.flags & dns.flags.RA)
+
+    def test_parse_query_context_should_refuse_non_query_opcode(self) -> None:
+        request = dns.message.make_query("example.com.", dns.rdatatype.A)
+        request.set_opcode(dns.opcode.STATUS)
+
+        with self.assertRaises(RefusedRequestError):
+            parse_query_context(request.to_wire(), client_addr=("127.0.0.1", 5335))
+
+    def test_parse_query_context_should_refuse_non_in_qclass(self) -> None:
+        request = dns.message.make_query(
+            "example.com.",
+            dns.rdatatype.A,
+            dns.rdataclass.CH,
+        )
+
+        with self.assertRaises(RefusedRequestError):
+            parse_query_context(request.to_wire(), client_addr=("127.0.0.1", 5335))
+
+    def test_build_error_response_wire_should_include_common_flags(self) -> None:
+        request = dns.message.make_query("example.com.", dns.rdatatype.A)
+
+        response = dns.message.from_wire(
+            build_error_response_wire(request.to_wire(), dns.rcode.REFUSED)
+        )
+
+        self.assertEqual(response.rcode(), dns.rcode.REFUSED)
+        self.assertTrue(response.flags & dns.flags.QR)
+        self.assertTrue(response.flags & dns.flags.RD)
+        self.assertTrue(response.flags & dns.flags.RA)
 
     def test_context_defaults(self) -> None:
         ctx = QueryContext(query=self.query)

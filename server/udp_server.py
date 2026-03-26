@@ -10,6 +10,7 @@ import dns.rcode
 
 from core.pipeline import Pipeline
 from core.wire import (
+    RefusedRequestError,
     build_error_response_wire,
     build_response_wire,
     parse_query_context,
@@ -110,6 +111,9 @@ class UDPDNSServer:
                 len(answer.response.answer),
             )
             return build_response_wire(ctx, answer)
+        except RefusedRequestError:
+            logger.debug("DNS 请求被拒绝 client=%s", addr)
+            return build_error_response_wire(data, rcode=dns.rcode.REFUSED)
         except dns.exception.DNSException:
             logger.exception("DNS 请求解析失败 client=%s", addr)
             return build_error_response_wire(data, rcode=dns.rcode.FORMERR)

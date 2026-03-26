@@ -7,6 +7,7 @@ import time
 from typing import Any, cast
 
 import dns.message
+import dns.flags
 import dns.rcode
 import dns.rdataclass
 import dns.resolver
@@ -65,6 +66,14 @@ class Answer(dns.resolver.Answer):
         return cast(dns.rrset.RRset, rrset._clone())
 
     @staticmethod
+    def ensure_response_flags(
+        response: dns.message.Message,
+    ) -> dns.message.Message:
+        # 本地构造/回包时统一补齐常见递归响应标志。
+        response.flags |= dns.flags.QR | dns.flags.RD | dns.flags.RA
+        return response
+
+    @staticmethod
     def _copy_request_message(query: Query) -> dns.message.QueryMessage:
         request = query.message
         if request is None:
@@ -101,7 +110,7 @@ class Answer(dns.resolver.Answer):
         cls,
         answer: dns.resolver.Answer,
     ) -> dns.message.QueryMessage:
-        response = cls._clone_message(answer.response)
+        response = cls.ensure_response_flags(cls._clone_message(answer.response))
         response.set_rcode(
             dns.rcode.Rcode(getattr(answer, "rcode", answer.response.rcode()))
         )
@@ -138,6 +147,7 @@ class Answer(dns.resolver.Answer):
         port: int | None = None,
         tags: Iterable[str] | None = None,
     ) -> "Answer":
+        cls.ensure_response_flags(response)
         return cls(
             query.qname,
             query.qtype,
@@ -160,7 +170,7 @@ class Answer(dns.resolver.Answer):
         tags: Iterable[str] | None = None,
     ) -> "Answer":
         request = cls._copy_request_message(query)
-        response = dns.message.make_response(request)
+        response = cls.ensure_response_flags(dns.message.make_response(request))
         response.set_rcode(rcode)
         if rrsets is not None:
             response.answer.extend(rrsets)
@@ -251,7 +261,7 @@ def make_answer(
         )
 
     if answer is None:
-        response = dns.message.make_response(request)
+        response = Answer.ensure_response_flags(dns.message.make_response(request))
         response.set_rcode(dns.rcode.SERVFAIL)
         return response
 
@@ -262,4 +272,4 @@ def make_answer(
 
     # 上游/缓存中的响应事务 ID 不一定等于当前客户端请求，回包前必须按当前请求重写。
     response.id = request.id
-    return response
+    return Answer.ensure_response_flags(response)
