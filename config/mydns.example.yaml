@@ -28,6 +28,8 @@ ipset:
     - rules/geoip/private.list
   telegram:
     - rules/geoip/telegram.list
+  cloudflare:
+    - rules/geoip/cloudflare.list
 
 # 按命中的 domainset tag 执行动作，并同步更新 ctx.tags。
 # 仅在 hooks.request 中显式声明 plugins.domain_rule.DomainRuleRequestHook 时生效。
@@ -166,6 +168,7 @@ hooks:
   # - plugins.domain_rule.DomainRuleRequestHook
   # - plugins.tagset.TagSetResolverHook
   # - plugins.ip_rule.IPRuleResolverHook
+  # - plugins.https_record.HttpsRecordResponseHook
   # - plugins.speedcheck.SpeedCheckResolverHook
   # - plugins.speedcheck.RewriteAnswerByRTTHook
   request:
@@ -203,6 +206,15 @@ hooks:
   response:
     # 简写：无参数响应阶段插件
     - plugins.builtin.NoopResponseHook
+    # 手动启用 HTTPS 记录清洗：
+    # 1. 移除 alpn 中的 h3
+    # 2. 若同时包含 ipv4hint/ipv6hint，则两者一起移除
+    # 3. 若没有 ech，且当前结果/提示地址/子查询结果可判定属于 Cloudflare，则注入 cloudflare-ech.com 的 ech
+    # 建议放在 CacheHook 之前，这样写入缓存的是最终整理后的 HTTPS 记录。
+    - class: plugins.https_record.HttpsRecordResponseHook
+      kwargs:
+        skip_result_tags: [ads]
+        cloudflare_tags: [cloudflare]
     # 完整写法：根据测速 RTT 重写最终返回的 A/AAAA 记录
     - class: plugins.speedcheck.RewriteAnswerByRTTHook
       kwargs:

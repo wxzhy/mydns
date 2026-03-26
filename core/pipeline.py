@@ -8,6 +8,7 @@ from core.answer import Answer
 from core.cache import fail_pending_request, resolve_pending_request
 from core.context import QueryContext
 from core.hooks import RequestHook, ResolverHook, ResponseHook
+from core.models import Query
 from logger import get_logger
 from resolver.resolver import Resolver
 from upstream.resolver_manager import ResolverManager
@@ -39,7 +40,25 @@ class Pipeline:
 
     async def process(self, ctx: QueryContext) -> Answer:
         """执行完整流水线并返回最终响应。"""
+        return await self._process_with_timeout(ctx, self.upstream_timeout_s)
+
+    async def resolve(
+        self,
+        query: Query,
+        timeout_s: float | None = None,
+    ) -> Answer:
+        """以 resolver 风格发起一次内部查询，并返回最终 Answer。"""
+        ctx = QueryContext(query=query)
+        effective_timeout_s = self.upstream_timeout_s if timeout_s is None else timeout_s
+        return await self._process_with_timeout(ctx, effective_timeout_s)
+
+    async def _process_with_timeout(
+        self,
+        ctx: QueryContext,
+        timeout_s: float,
+    ) -> Answer:
         try:
+            ctx.state["pipeline"] = self
             logger.debug(
                 "处理请求 qname=%s qtype=%s client=%s tags=%s",
                 ctx.query.qname.to_text(),
@@ -49,7 +68,7 @@ class Pipeline:
             )
             await self._run_request_hooks(ctx)
             if not ctx.stop:
-                await self._run_upstream(ctx)
+                await self._run_upstream(ctx, timeout_s)
             else:
                 logger.debug("请求被request hook短路 qname=%s", ctx.query.qname.to_text())
 
@@ -76,8 +95,8 @@ class Pipeline:
             if ctx.stop:
                 break
 
-    async def _run_upstream(self, ctx: QueryContext) -> None:
-        await self.resolver_manager.collect(ctx, self.upstream_timeout_s)
+    async def _run_upstream(self, ctx: QueryContext, timeout_s: float) -> None:
+        await self.resolver_manager.collect(ctx, timeout_s)
 
     async def _run_response_hooks(self, ctx: QueryContext) -> None:
         for hook in self.response_hooks:

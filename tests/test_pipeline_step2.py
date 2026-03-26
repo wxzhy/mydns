@@ -107,6 +107,31 @@ class TestPipelineStep2(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(answer.response.rcode(), dns.rcode.SERVFAIL)
         self.assertEqual(events, ["request", "response"])
 
+    async def test_pipeline_resolve_should_return_answer(self) -> None:
+        events: list[str] = []
+        query = Query(
+            client_addr=None,
+            qname=dns.name.from_text("resolve.example."),
+            qtype=dns.rdatatype.A,
+        )
+        pipeline = Pipeline(
+            resolvers=[
+                _TrackResolver(
+                    events,
+                    Answer.from_query(query, rcode=dns.rcode.NOERROR),
+                )
+            ],
+            request_hooks=[_TrackRequestHook(events)],
+            response_hooks=[RewriteAnswerByRTTHook(), _TrackResponseHook(events)],
+        )
+
+        answer = await pipeline.resolve(query, timeout_s=0.5)
+
+        self.assertIsInstance(answer, Answer)
+        self.assertEqual(answer.response.rcode(), dns.rcode.NOERROR)
+        self.assertEqual(answer.tags, {"default"})
+        self.assertEqual(events, ["request", "upstream", "response"])
+
 
 if __name__ == "__main__":
     unittest.main()

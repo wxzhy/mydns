@@ -15,6 +15,7 @@ from core.domainset import domainset
 from plugins.builtin import NoopRequestHook
 from plugins.cache import CacheHook
 from plugins.domain_rule import DomainRuleRequestHook
+from plugins.https_record import HttpsRecordResponseHook
 from plugins.ip_rule import IPRuleResolverHook
 from plugins.speedcheck import SpeedCheckResolverHook
 from plugins.tagset import TagSetResolverHook
@@ -105,6 +106,63 @@ class TestConfig(unittest.TestCase):
         self.assertIsInstance(hook, SpeedCheckResolverHook)
         self.assertAlmostEqual(hook.timeout_s, 0.3)
         self.assertEqual(get_probe_cache_config(), (10000, 3600.0))
+
+    def test_https_record_response_hook_should_load_with_defaults(self) -> None:
+        content = """
+        ipset:
+          cloudflare:
+            - cloudflare.txt
+        hooks:
+          response:
+            - class: plugins.https_record.HttpsRecordResponseHook
+        """
+        with tempfile.TemporaryDirectory(prefix="mydns-https-response-hook-") as td:
+            base = Path(td)
+            (base / "cloudflare.txt").write_text("1.1.1.0/24\n", encoding="utf-8")
+            path = base / "mydns.yaml"
+            path.write_text(textwrap.dedent(content), encoding="utf-8")
+            runtime = load_runtime_config(path)
+
+        self.assertIsInstance(runtime.pipeline.response_hooks[0], HttpsRecordResponseHook)
+        self.assertEqual(runtime.pipeline.response_hooks[0].cloudflare_tags, {"cloudflare"})
+
+    def test_https_record_response_hook_should_validate_skip_tags(self) -> None:
+        raw = {
+            "ipset": {
+                "cloudflare": ["cloudflare.txt"],
+            },
+            "hooks": {
+                "response": [
+                    {
+                        "class": "plugins.https_record.HttpsRecordResponseHook",
+                        "kwargs": {
+                            "skip_result_tags": ["missing"],
+                        },
+                    }
+                ]
+            },
+        }
+        with tempfile.TemporaryDirectory(prefix="mydns-https-response-hook-skip-") as td:
+            base = Path(td)
+            (base / "cloudflare.txt").write_text("1.1.1.0/24\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "未定义的结果 tag"):
+                build_runtime_config(raw, base_dir=base)
+
+    def test_https_record_response_hook_should_validate_cloudflare_tags(self) -> None:
+        raw = {
+            "hooks": {
+                "response": [
+                    {
+                        "class": "plugins.https_record.HttpsRecordResponseHook",
+                        "kwargs": {
+                            "cloudflare_tags": ["missing"],
+                        },
+                    }
+                ]
+            },
+        }
+        with self.assertRaisesRegex(ValueError, "未定义的Cloudflare tag"):
+            build_runtime_config(raw)
 
     def test_tagset_hook_should_load_when_declared_manually(self) -> None:
         content = """

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from importlib import import_module
 from pathlib import Path
 from typing import Any
@@ -18,6 +18,7 @@ from core.pipeline import Pipeline
 from plugins.builtin import NoopRequestHook, NoopResolverHook, NoopResponseHook
 from plugins.cache import CacheHook
 from plugins.domain_rule import DomainRuleRequestHook
+from plugins.https_record import HttpsRecordResponseHook
 from plugins.ip_rule import IPRuleResolverHook
 from plugins.speedcheck import RewriteAnswerByRTTHook, SpeedCheckResolverHook
 from plugins.tagset import TagSetResolverHook
@@ -137,6 +138,7 @@ def build_runtime_config(
     )
 
     _validate_resolver_hook_configs(resolver_hooks)
+    _validate_response_hook_configs(response_hooks)
     _validate_request_hook_order(request_hooks)
     _validate_resolver_hook_order(resolver_hooks)
 
@@ -689,6 +691,38 @@ def _validate_resolver_hook_configs(hooks: list[ResolverHook]) -> None:
                 ip_tags=ipset.tags,
                 key="plugins.ip_rule.IPRuleResolverHook",
             )
+
+
+def _validate_response_hook_configs(hooks: list[ResponseHook]) -> None:
+    for hook in hooks:
+        if not isinstance(hook, HttpsRecordResponseHook):
+            continue
+        _validate_tag_membership(
+            hook.skip_result_tags,
+            available_tags=domainset.tags | {"default"},
+            key="plugins.https_record.HttpsRecordResponseHook.skip_result_tags",
+            label="结果 tag",
+        )
+        _validate_tag_membership(
+            hook.cloudflare_tags,
+            available_tags=domainset.tags | ipset.tags,
+            key="plugins.https_record.HttpsRecordResponseHook.cloudflare_tags",
+            label="Cloudflare tag",
+        )
+
+
+def _validate_tag_membership(
+    referenced_tags: Iterable[str],
+    *,
+    available_tags: set[str],
+    key: str,
+    label: str,
+) -> None:
+    unknown_tags = [tag for tag in referenced_tags if tag not in available_tags]
+    if unknown_tags:
+        raise ValueError(
+            f"{key} 引用了未定义的{label}: {', '.join(sorted(unknown_tags))}"
+        )
 
 
 def _default_resolvers() -> list[Resolver]:
