@@ -1,64 +1,155 @@
 # mydns：插件式流水线 DNS 服务器（Python）
 
-## 项目简介
+`mydns` 是一个基于 Python 的可扩展 DNS 服务，采用 **三阶段流水线 + 插件机制** 处理请求。
 
-`mydns` 采用插件化 + 流水线架构实现 DNS 查询处理，目标是为终端设备提供更好的网页访问体验。
-当前优先支持与优化：`A / AAAA / HTTPS`，同时兼容 `SRV / TXT / PTR(rDNS)` 的基础通路。
+- 请求阶段可打标签、命中规则并短路
+- 上游阶段支持多 resolver 并发查询
+- 响应阶段可做测速聚合、记录清洗、缓存写回
 
-## 核心抽象
+当前重点优化类型：`A / AAAA / HTTPS`；其余类型（如 `SRV / TXT / PTR`）走通用快速成功策略。
 
-- `Query = (client_addr, qname, qtype, ecs)`
-- `Answer = dns.resolver.Answer（通过 answer.response.rcode()/answer.response.answer 访问响应）`
-- `QueryContext = (query, candidates, final_answer, tags, state, stop)`
+## 核心特性
 
-为简化首版设计，忽略 `qclass`、`authority` 等非关键字段。
+- **插件化流水线**：`request hooks -> upstream -> response hooks`
+- **多协议上游**：UDP / TCP / TLS(DoT) / HTTPS(DoH) / QUIC(DoQ)
+- **标签驱动路由**：通过 `ctx.tags` 与 resolver `tags` 做动态匹配
+- **域名/地址规则**：`domainset`（marisa-trie）+ `ipset`（py-radix）
+- **测速改写**：A/AAAA 按 RTT 选择最快 IP（默认最多返回 2 个）
+- **缓存与请求合并**：同 key 并发请求可等待同一 owner 结果，减少击穿
+- **HTTPS 记录处理**：支持 h3/hint 清洗与可选 ECH 注入
 
-## 流水线阶段
+## 架构总览
 
-```text
-request hooks -> upstream (ResolverManager并发) -> response hooks
-```
+### 主入口
 
-- `request hooks`：请求首部处理，可打标签、短路返回。
-- `upstream`：按标签筛选 resolver，并发查询；每个结果返回后立刻执行 `resolver hooks`。
-- `response hooks`：响应尾部处理。
+- `main.py`
+	- 参数：`--config --host --port`
+	- 默认读取 `config/mydns.example.yaml`
+	- 启动 `UDPDNSServer` 与（可选）`TCPDNSServer`
 
-### 响应选择策略（首版）
+### 关键调用链
 
-- `A/AAAA`：并发返回后按时延聚合，选最快 2 个去重 IP，并保留 `CNAME chain`。
-- `HTTPS/SRV/TXT/PTR`：采用“最快成功结果直通”。
+1. `server/*` 接收 DNS 报文
+2. `core/wire.py::parse_query_context()` 解析为 `QueryContext`
+3. `core/pipeline.py::Pipeline.process()` 执行三阶段流水线
+4. `upstream/resolver_manager.py` 并发请求并执行 resolver hooks
+5. `core/wire.py::build_response_wire()` 回包
+
+### 核心模型
+
+- `Query`：客户端地址、qname、qtype、txid、ECS、原始 message
+- `QueryContext`：`query / candidates / final_answer / tags / state / stop`
+- `Answer`：对 `dnspython` 的统一封装，含 rcode 与 rrset 更新逻辑
+
+## 上游并发与选择策略
+
+- `A/AAAA`：**wait_all**
+	- 等待所有匹配 resolver 结果
+	- 汇总测速结果后按 RTT 排序
+	- 默认返回最快 2 个 IP，并保留 CNAME 链
+- 其他类型：**first_success**
+	- 收到首个正常结果即可提前结束
+- 若最终没有有效结果：回退 `SERVFAIL`
+
+## 内置插件（plugins）
+
+- `cache.CacheHook`：请求读缓存 + 响应写缓存
+- `domain_rule.DomainRuleRequestHook`：domainset 命中后执行 `intercept/hosts`
+- `tagset.TagSetResolverHook`：基于 CNAME 链补标签并可做 uncloaking
+- `ip_rule.IPRuleResolverHook`：按结果标签改写 A/AAAA 地址
+- `speedcheck.SpeedCheckResolverHook`：IP 测速并写入上下文
+- `speedcheck.RewriteAnswerByRTTHook`：按 RTT 重写最终 A/AAAA 结果
+- `https_record.HttpsRecordResponseHook`：清洗 HTTPS RR（h3/hint）并按需注入 ECH
+
+> Hook 顺序有约束（由 `config.py` 校验）：
+>
+> - `DomainRuleRequestHook` 必须在 `CacheHook` 之后
+> - `TagSetResolverHook` 必须在 `IPRuleResolverHook` 之前
+> - `TagSetResolverHook` / `IPRuleResolverHook` 必须在 `SpeedCheckResolverHook` 之前
 
 ## 目录结构
 
 ```text
-core/      核心模型、hook接口、pipeline、wire转换
-upstream/  上游并发管理与响应选择器
-resolver/  解析器抽象与UDP上游实现
-plugins/   内置示例插件（Noop）
-server/    UDP 服务接入层
-tests/     单元测试与集成测试
+core/      核心模型、上下文、流水线、wire、缓存、集合结构
+upstream/  并发调度与响应选择
+resolver/  上游解析器抽象与协议实现（udp/tcp/tls/https/quic）
+plugins/   内置 request/resolver/response 插件
+server/    UDP/TCP 接入层
+config/    示例配置与规则文件
+tests/     单元测试 + 分阶段集成测试（step1~step5）
 ```
 
-## 运行方式
+## 环境要求
 
-1. 安装依赖：`uv sync`
-2. 启动服务：`uv run python main.py --host 127.0.0.1 --port 5335`
-3. 示例查询（Windows）：`nslookup -type=A www.example.com 127.0.0.1`
+- Python `>= 3.13`
+- 推荐使用 `uv`
 
-## 测试命令
+依赖定义见 `pyproject.toml`（`dnspython[doh,doq]`、`pydantic`、`pyyaml`、`icmplib`、`marisa-trie`、`py-radix`、`async-lru` 等）。
 
-- 运行单个测试：`uv run python -m unittest -v tests/test_selector_step4.py`
-- 运行全量测试：`uv run python -m unittest discover -s tests -v`
+## 快速开始
 
-## 插件扩展方式（代码注册）
+### 1) 安装依赖
 
-当前版本使用代码注册表装配插件，入口位于 `app.py`：
+- 推荐：`uv sync`
 
-- 注册 `request_hooks / resolver_hooks / response_hooks`
-- 注册 `resolvers`
-- 传入 `Pipeline(...)` 统一编排
+### 2) 启动服务
 
-## 示例配置（说明用途）
+- 使用示例配置启动（默认路径）：`uv run python main.py`
+- 指定配置文件：`uv run python main.py --config config/mydns.example.yaml`
+- 覆盖监听地址：`uv run python main.py --host 127.0.0.1 --port 5335`
 
-项目提供 `config/mydns.example.yaml` 用于展示未来配置化方向。
-当前运行时仍以 `app.py` 代码注册为准。
+> 默认配置来自 `config/mydns.example.yaml`；若你传入 `--host/--port`，会覆盖配置文件中的监听参数。
+
+### 3) 发起查询（Windows 示例）
+
+- `nslookup -type=A www.example.com 127.0.0.1`
+- `nslookup -type=AAAA www.example.com 127.0.0.1`
+
+## 配置说明
+
+完整示例见 `config/mydns.example.yaml`。
+
+主要字段：
+
+- `server`: `host/port/udp/tcp`
+- `pipeline`: `upstream_timeout_s`
+- `domainset` / `ipset`: tag 到规则文件的映射
+- `domain_rules` / `ip_rules`: 规则引擎配置
+- `resolvers`: 上游列表（支持 `type` 或自定义 `class`）
+- `hooks`: `request/resolver/response` 三段插件链
+
+## 代码装配方式
+
+除 YAML 方式外，也可直接在 `app.py` 中通过代码注册：
+
+- 构建 `request_hooks / resolver_hooks / response_hooks`
+- 构建 resolver 列表
+- 传入 `Pipeline(...)`
+
+适用于快速实验或本地调试。
+
+## 测试
+
+- 全量回归：`python -m unittest discover -s tests -v`
+- 使用 uv：`uv run python -m unittest discover -s tests -v`
+- 单文件示例：`uv run python -m unittest -v tests/test_selector_step4.py`
+
+测试包含：
+
+- 核心模型与 wire 解析
+- pipeline 各阶段行为
+- resolver manager 并发策略
+- selector 选择逻辑
+- trick sockets（运行时 / Windows loop）
+- UDP/TCP 集成路径
+
+## 平台说明
+
+- Windows 下入口使用 `winuvloop.install()` 优化事件循环
+- `resolver/tricks/` 提供可选的自定义 socket 行为（TCP/UDP）
+
+## 贡献建议
+
+1. 优先做最小改动，保持现有 hook 顺序与语义
+2. 新增插件时补充对应单元测试
+3. 改动策略（选择、缓存、规则）时同步更新本文档与示例配置
