@@ -9,8 +9,10 @@ from typing import Any
 
 from async_lru import alru_cache
 from icmplib import async_ping
+from pydantic import field_validator
 
 from logger import get_logger
+from plugins._config import PluginConfigModel, normalize_positive_float, normalize_positive_int
 
 logger = get_logger("plugins.utils.speedcheck")
 
@@ -19,6 +21,21 @@ DEFAULT_PROBE_CACHE_TTL_S = 3600.0
 
 _probe_cache_max_size = DEFAULT_PROBE_CACHE_MAX_SIZE
 _probe_cache_ttl_s = DEFAULT_PROBE_CACHE_TTL_S
+
+
+class ProbeCacheConfigModel(PluginConfigModel):
+    max_size: int = DEFAULT_PROBE_CACHE_MAX_SIZE
+    ttl_s: float = DEFAULT_PROBE_CACHE_TTL_S
+
+    @field_validator("max_size", mode="before")
+    @classmethod
+    def _normalize_max_size(cls, value: Any) -> int:
+        return normalize_positive_int(value, key="speedcheck cache max_size")
+
+    @field_validator("ttl_s", mode="before")
+    @classmethod
+    def _normalize_ttl_s(cls, value: Any) -> float:
+        return normalize_positive_float(value, key="speedcheck cache ttl_s")
 
 
 async def probe_ips(
@@ -69,8 +86,14 @@ def configure(
     """配置全局单 IP 测速缓存。未传参数时回落默认值。"""
     global _probe_cache_max_size, _probe_cache_ttl_s
 
-    _probe_cache_max_size = _normalize_cache_max_size(max_size)
-    _probe_cache_ttl_s = _normalize_cache_ttl(ttl_s)
+    raw_config: dict[str, Any] = {}
+    if max_size is not None:
+        raw_config["max_size"] = max_size
+    if ttl_s is not None:
+        raw_config["ttl_s"] = ttl_s
+    config = ProbeCacheConfigModel.model_validate(raw_config)
+    _probe_cache_max_size = config.max_size
+    _probe_cache_ttl_s = config.ttl_s
     _reset_probe_one_ip_cache()
     logger.debug(
         "测速缓存配置更新 max_size=%s ttl_s=%.3fs",
@@ -106,30 +129,6 @@ def _reset_probe_one_ip_cache() -> None:
     cache_clear = getattr(old_probe_one_ip, "cache_clear", None)
     if callable(cache_clear):
         cache_clear()
-
-
-def _normalize_cache_max_size(max_size: int | None) -> int:
-    if max_size is None:
-        return DEFAULT_PROBE_CACHE_MAX_SIZE
-    try:
-        normalized = int(max_size)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("speedcheck cache max_size 必须是正整数") from exc
-    if normalized <= 0:
-        raise ValueError("speedcheck cache max_size 必须是正整数")
-    return normalized
-
-
-def _normalize_cache_ttl(ttl_s: float | None) -> float:
-    if ttl_s is None:
-        return DEFAULT_PROBE_CACHE_TTL_S
-    try:
-        normalized = float(ttl_s)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("speedcheck cache ttl_s 必须是正数") from exc
-    if normalized <= 0:
-        raise ValueError("speedcheck cache ttl_s 必须是正数")
-    return normalized
 
 
 async def _probe_ping(ip: str, timeout_s: float) -> float | None:

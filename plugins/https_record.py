@@ -14,6 +14,7 @@ import dns.rdatatype
 import dns.rrset
 from async_lru import alru_cache
 from dns.rdtypes import svcbbase
+from pydantic import field_validator
 
 from core.answer import Answer
 from core.context import QueryContext
@@ -21,6 +22,7 @@ from core.hooks import ResponseHook
 from core.ipset import ipset
 from core.models import Query
 from logger import get_logger
+from plugins._config import PluginConfigModel, normalize_string_tuple
 
 if TYPE_CHECKING:
     from core.pipeline import Pipeline
@@ -33,6 +35,29 @@ _ECH_CACHE_TTL_S = 300
 _ECH_CACHE_MAX_SIZE = 16
 
 
+class HttpsRecordResponseHookConfigModel(PluginConfigModel):
+    skip_result_tags: tuple[str, ...] = ()
+    cloudflare_tags: tuple[str, ...] = ("cloudflare",)
+
+    @field_validator("skip_result_tags", mode="before")
+    @classmethod
+    def _normalize_skip_result_tags(cls, value: Any) -> tuple[str, ...]:
+        return normalize_string_tuple(
+            value,
+            key="plugins.https_record.HttpsRecordResponseHook.skip_result_tags",
+            allow_none=True,
+        )
+
+    @field_validator("cloudflare_tags", mode="before")
+    @classmethod
+    def _normalize_cloudflare_tags(cls, value: Any) -> tuple[str, ...]:
+        return normalize_string_tuple(
+            value,
+            key="plugins.https_record.HttpsRecordResponseHook.cloudflare_tags",
+            allow_none=True,
+        )
+
+
 class HttpsRecordResponseHook(ResponseHook):
     """清洗 HTTPS 记录中的 h3/hint，并按需补充 Cloudflare ECH。"""
 
@@ -42,9 +67,14 @@ class HttpsRecordResponseHook(ResponseHook):
         skip_result_tags: Iterable[str] | None = None,
         cloudflare_tags: Iterable[str] | None = None,
     ) -> None:
-        self.skip_result_tags = {str(tag) for tag in (skip_result_tags or [])}
-        raw_cloudflare_tags = cloudflare_tags or ["cloudflare"]
-        self.cloudflare_tags = {str(tag) for tag in raw_cloudflare_tags}
+        raw_config: dict[str, Any] = {}
+        if skip_result_tags is not None:
+            raw_config["skip_result_tags"] = skip_result_tags
+        if cloudflare_tags is not None:
+            raw_config["cloudflare_tags"] = cloudflare_tags
+        config = HttpsRecordResponseHookConfigModel.model_validate(raw_config)
+        self.skip_result_tags = set(config.skip_result_tags)
+        self.cloudflare_tags = set(config.cloudflare_tags)
 
     async def on_response(self, ctx: QueryContext) -> None:
         answer = ctx.final_answer
@@ -174,6 +204,13 @@ class HttpsRecordResponseHook(ResponseHook):
             owner_name,
             self.cloudflare_tags,
         )
+
+
+def normalize_https_record_hook_kwargs(raw_kwargs: Any) -> dict[str, Any]:
+    config = HttpsRecordResponseHookConfigModel.model_validate(
+        {} if raw_kwargs is None else raw_kwargs
+    )
+    return config.model_dump(mode="python", exclude_none=True)
 
 
 def _skip_reason(

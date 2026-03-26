@@ -2,19 +2,73 @@
 
 from __future__ import annotations
 
-from typing import Iterable
+from collections.abc import Iterable
+from typing import Any
 
 import dns.rcode
+from pydantic import field_validator
 
 from core.answer import Answer
 from core.cache import AnswerLRUCache, build_cache_key
 from core.context import QueryContext
 from core.hooks import RequestHook, ResponseHook
 from logger import get_logger
+from plugins._config import (
+    PluginConfigModel,
+    normalize_nonempty_string,
+    normalize_positive_int,
+)
 
 
 logger = get_logger("plugins.cache")
 _CACHE_REGISTRY: dict[str, AnswerLRUCache] = {}
+
+
+class CacheHookConfigModel(PluginConfigModel):
+    cache: AnswerLRUCache | None = None
+    cache_name: str = "default"
+    max_size: int = 100000
+    cacheable_rcodes: tuple[dns.rcode.Rcode, ...] = (dns.rcode.NOERROR,)
+
+    @field_validator("cache_name", mode="before")
+    @classmethod
+    def _normalize_cache_name(cls, value: Any) -> str:
+        return normalize_nonempty_string(value, key="plugins.cache.CacheHook.cache_name")
+
+    @field_validator("max_size", mode="before")
+    @classmethod
+    def _normalize_max_size(cls, value: Any) -> int:
+        return normalize_positive_int(value, key="plugins.cache.CacheHook.max_size")
+
+    @field_validator("cacheable_rcodes", mode="before")
+    @classmethod
+    def _normalize_cacheable_rcodes(
+        cls,
+        value: Any,
+    ) -> tuple[dns.rcode.Rcode, ...]:
+        if value is None:
+            return (dns.rcode.NOERROR,)
+        if isinstance(value, Iterable) and not isinstance(value, (str, bytes, bytearray)):
+            raw_values = list(value)
+        else:
+            raise ValueError(
+                "plugins.cache.CacheHook.cacheable_rcodes 必须是整数列表"
+            )
+
+        normalized: list[dns.rcode.Rcode] = []
+        seen: set[int] = set()
+        for index, item in enumerate(raw_values):
+            try:
+                rcode = dns.rcode.Rcode(int(item))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"plugins.cache.CacheHook.cacheable_rcodes[{index}] 不是合法 RCODE"
+                ) from exc
+            if int(rcode) in seen:
+                continue
+            seen.add(int(rcode))
+            normalized.append(rcode)
+        return tuple(normalized)
 
 
 def get_shared_cache(
@@ -40,11 +94,19 @@ class CacheHook(RequestHook, ResponseHook):
         max_size: int = 100000,
         cacheable_rcodes: Iterable[dns.rcode.Rcode] | None = None,
     ) -> None:
-        self.cache = cache or get_shared_cache(cache_name=cache_name, max_size=max_size)
-        if cacheable_rcodes is None:
-            self.cacheable_rcodes = {dns.rcode.NOERROR}
-        else:
-            self.cacheable_rcodes = {dns.rcode.Rcode(x) for x in cacheable_rcodes}
+        raw_config: dict[str, Any] = {
+            "cache": cache,
+            "cache_name": cache_name,
+            "max_size": max_size,
+        }
+        if cacheable_rcodes is not None:
+            raw_config["cacheable_rcodes"] = cacheable_rcodes
+        config = CacheHookConfigModel.model_validate(raw_config)
+        self.cache = config.cache or get_shared_cache(
+            cache_name=config.cache_name,
+            max_size=config.max_size,
+        )
+        self.cacheable_rcodes = set(config.cacheable_rcodes)
 
     async def on_request(self, ctx: QueryContext) -> None:
         key = build_cache_key(ctx.query)
@@ -103,3 +165,8 @@ class CacheHook(RequestHook, ResponseHook):
             ctx.query.qtype,
             rcode,
         )
+
+
+def normalize_cache_hook_kwargs(raw_kwargs: Any) -> dict[str, Any]:
+    config = CacheHookConfigModel.model_validate({} if raw_kwargs is None else raw_kwargs)
+    return config.model_dump(mode="python", exclude_none=True)

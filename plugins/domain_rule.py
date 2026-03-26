@@ -2,21 +2,29 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
-from ipaddress import ip_address
+from typing import Any
 
 import dns.rcode
 import dns.rdata
 import dns.rdataclass
 import dns.rdatatype
 import dns.rrset
+from pydantic import Field, field_validator, model_validator
 
 from core.answer import Answer
 from core.context import QueryContext
 from core.domainset import domainset
 from core.hooks import RequestHook
 from logger import get_logger
+from plugins._config import (
+    PluginConfigModel,
+    dump_model_compact,
+    normalize_ip_tuple,
+    normalize_nonempty_string,
+    normalize_positive_int,
+)
 
 
 logger = get_logger("plugins.domain_rule")
@@ -33,6 +41,75 @@ class _DomainRule:
     records: dict[dns.rdatatype.RdataType, tuple[str, ...]]
 
 
+class _DomainRuleConfigModel(PluginConfigModel):
+    action: str
+    ttl_s: int = _DEFAULT_TTL_S
+    A: tuple[str, ...] = ()
+    AAAA: tuple[str, ...] = ()
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_raw(cls, raw: Any) -> dict[str, Any]:
+        if isinstance(raw, str):
+            return {"action": raw}
+        if not isinstance(raw, Mapping):
+            raise ValueError("domain_rules.<tag> 必须是字符串或对象")
+
+        data = dict(raw)
+        if "action" not in data and "mode" in data:
+            data["action"] = data["mode"]
+        data.pop("mode", None)
+        return data
+
+    @field_validator("action", mode="before")
+    @classmethod
+    def _normalize_action(cls, value: Any) -> str:
+        action = normalize_nonempty_string(value, key="domain_rules.<tag>.action")
+        normalized = action.lower()
+        if normalized not in {"intercept", "hosts"}:
+            raise ValueError("domain_rules.<tag>.action 仅支持 intercept 或 hosts")
+        return normalized
+
+    @field_validator("ttl_s", mode="before")
+    @classmethod
+    def _normalize_ttl_s(cls, value: Any) -> int:
+        return normalize_positive_int(value, key="domain_rules.<tag>.ttl_s")
+
+    @field_validator("A", mode="before")
+    @classmethod
+    def _normalize_a_records(cls, value: Any) -> tuple[str, ...]:
+        return normalize_ip_tuple(value, key="domain_rules.<tag>.A", version=4)
+
+    @field_validator("AAAA", mode="before")
+    @classmethod
+    def _normalize_aaaa_records(cls, value: Any) -> tuple[str, ...]:
+        return normalize_ip_tuple(value, key="domain_rules.<tag>.AAAA", version=6)
+
+    @model_validator(mode="after")
+    def _validate_hosts_records(self) -> "_DomainRuleConfigModel":
+        if self.action == "hosts" and not self.A and not self.AAAA:
+            raise ValueError("domain_rules.<tag> 的 hosts 规则至少需要一个 A/AAAA 记录")
+        return self
+
+
+class DomainRuleHookConfigModel(PluginConfigModel):
+    rules: dict[str, _DomainRuleConfigModel] = Field(default_factory=dict)
+
+    @field_validator("rules", mode="before")
+    @classmethod
+    def _normalize_rules(cls, value: Any) -> dict[str, Any]:
+        if value is None:
+            return {}
+        if not isinstance(value, Mapping):
+            raise ValueError("domain_rules 必须是对象")
+
+        normalized: dict[str, Any] = {}
+        for raw_tag, raw_rule in value.items():
+            tag = normalize_nonempty_string(raw_tag, key="domain_rules.<tag>")
+            normalized[tag] = raw_rule
+        return normalized
+
+
 class DomainRuleRequestHook(RequestHook):
     """按 domainset tag 更新标签并执行本地域名规则。"""
 
@@ -41,7 +118,10 @@ class DomainRuleRequestHook(RequestHook):
         *,
         rules: Mapping[str, str | Mapping[str, object]] | None = None,
     ) -> None:
-        self.rules = _normalize_domain_rules(rules or {})
+        config = DomainRuleHookConfigModel.model_validate(
+            {} if rules is None else {"rules": rules}
+        )
+        self.rules = _build_domain_rules(config.rules)
         self.domainset_by_tag: dict[str, list[str]] = {tag: [] for tag in domainset.tags}
 
     async def on_request(self, ctx: QueryContext) -> None:
@@ -93,116 +173,43 @@ def _merge_request_tags(ctx: QueryContext, matched_tags: set[str]) -> None:
     ctx.tags.update(matched_tags)
 
 
-def _normalize_domain_rules(
-    raw: Mapping[str, str | Mapping[str, object]],
-) -> dict[str, _DomainRule]:
-    normalized: dict[str, _DomainRule] = {}
-    for raw_tag, raw_rule in raw.items():
-        if not isinstance(raw_tag, str) or not raw_tag.strip():
-            raise ValueError("domain_rules 的 tag 必须是非空字符串")
-        tag = raw_tag.strip()
-        normalized[tag] = _normalize_domain_rule(raw_rule, tag=tag)
-    return normalized
-
-
-def _normalize_domain_rule(
-    raw_rule: str | Mapping[str, object],
-    *,
-    tag: str,
-) -> _DomainRule:
-    if isinstance(raw_rule, str):
-        action = raw_rule.strip().lower()
-        if action != "intercept":
-            raise ValueError(f"domain_rules.{tag} 仅支持字符串动作 intercept")
-        return _DomainRule(action="intercept", ttl_s=_DEFAULT_TTL_S, records={})
-
-    if not isinstance(raw_rule, Mapping):
-        raise ValueError(f"domain_rules.{tag} 必须是字符串或对象")
-
-    raw_action = raw_rule.get("action", raw_rule.get("mode"))
-    if not isinstance(raw_action, str) or not raw_action.strip():
-        raise ValueError(f"domain_rules.{tag}.action 必须是非空字符串")
-    action = raw_action.strip().lower()
-
-    ttl_s = _normalize_positive_int(
-        raw_rule.get("ttl_s", _DEFAULT_TTL_S),
-        key=f"domain_rules.{tag}.ttl_s",
+def normalize_domain_rules_config(raw_value: Any) -> dict[str, Any]:
+    config = DomainRuleHookConfigModel.model_validate(
+        {} if raw_value is None else {"rules": raw_value}
     )
-    if action == "intercept":
-        return _DomainRule(action="intercept", ttl_s=ttl_s, records={})
-    if action == "hosts":
-        records = _normalize_domain_host_records(raw_rule, tag=tag)
-        if not records:
-            raise ValueError(f"domain_rules.{tag} 的 hosts 规则至少需要一个 A/AAAA 记录")
-        return _DomainRule(action="hosts", ttl_s=ttl_s, records=records)
-    raise ValueError(f"domain_rules.{tag}.action 仅支持 intercept 或 hosts")
+    return {
+        tag: dump_model_compact(rule)
+        for tag, rule in config.rules.items()
+    }
 
 
-def _normalize_domain_host_records(
-    raw_rule: Mapping[str, object],
-    *,
-    tag: str,
+def normalize_domain_rule_hook_kwargs(raw_kwargs: Any) -> dict[str, Any]:
+    config = DomainRuleHookConfigModel.model_validate({} if raw_kwargs is None else raw_kwargs)
+    return config.model_dump(mode="python", exclude_none=True)
+
+
+def _build_domain_rules(
+    config_rules: Mapping[str, _DomainRuleConfigModel],
+) -> dict[str, _DomainRule]:
+    return {
+        tag: _DomainRule(
+            action=rule.action,
+            ttl_s=rule.ttl_s,
+            records=_build_domain_host_records(rule),
+        )
+        for tag, rule in config_rules.items()
+    }
+
+
+def _build_domain_host_records(
+    rule: _DomainRuleConfigModel,
 ) -> dict[dns.rdatatype.RdataType, tuple[str, ...]]:
     records: dict[dns.rdatatype.RdataType, tuple[str, ...]] = {}
-    for qtype_text, qtype in (("A", dns.rdatatype.A), ("AAAA", dns.rdatatype.AAAA)):
-        if qtype_text not in raw_rule:
-            continue
-        records[qtype] = _normalize_ip_values(
-            raw_rule[qtype_text],
-            qtype=qtype,
-            key=f"domain_rules.{tag}.{qtype_text}",
-        )
+    if rule.A:
+        records[dns.rdatatype.A] = rule.A
+    if rule.AAAA:
+        records[dns.rdatatype.AAAA] = rule.AAAA
     return records
-
-
-def _normalize_ip_values(
-    raw_value: object,
-    *,
-    qtype: dns.rdatatype.RdataType,
-    key: str,
-) -> tuple[str, ...]:
-    if isinstance(raw_value, str):
-        values = [raw_value]
-    elif isinstance(raw_value, Sequence) and not isinstance(raw_value, (str, bytes, bytearray)):
-        values = list(raw_value)
-    else:
-        raise ValueError(f"{key} 必须是字符串或字符串列表")
-
-    normalized: list[str] = []
-    seen: set[str] = set()
-    for index, item in enumerate(values):
-        if not isinstance(item, str) or not item.strip():
-            raise ValueError(f"{key}[{index}] 必须是非空字符串 IP")
-        text = item.strip()
-        expected_qtype = _qtype_for_ip_text(text, key=f"{key}[{index}]")
-        if expected_qtype != qtype:
-            raise ValueError(f"{key}[{index}] 的 IP 版本与记录类型不匹配")
-        if text not in seen:
-            seen.add(text)
-            normalized.append(text)
-    return tuple(normalized)
-
-
-def _normalize_positive_int(raw_value: object, *, key: str) -> int:
-    try:
-        value = int(raw_value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"{key} 必须是正整数") from exc
-    if value <= 0:
-        raise ValueError(f"{key} 必须是正整数")
-    return value
-
-
-def _qtype_for_ip_text(
-    ip_text: str,
-    *,
-    key: str,
-) -> dns.rdatatype.RdataType:
-    try:
-        parsed = ip_address(ip_text)
-    except ValueError as exc:
-        raise ValueError(f"{key} 不是合法 IP: {ip_text}") from exc
-    return dns.rdatatype.A if parsed.version == 4 else dns.rdatatype.AAAA
 
 
 def _select_domain_rule(

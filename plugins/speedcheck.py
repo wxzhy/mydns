@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Awaitable, Callable
+from typing import Any
 
 import dns.rcode
 import dns.name
@@ -12,18 +13,85 @@ import dns.rdata
 import dns.rdataclass
 import dns.rdatatype
 import dns.rrset
+from pydantic import field_validator, model_validator
 
 from core.answer import Answer
 from core.context import QueryContext
 from core.hooks import ResolverHook, ResponseHook
 from core.models import ResolverResult
 from logger import get_logger
+from plugins._config import (
+    PluginConfigModel,
+    normalize_positive_float,
+    normalize_positive_int,
+)
 from plugins.utils.speedcheck import configure, probe_ips
 from upstream.selector import select_best_answer
 
 
 logger = get_logger("plugins.speedcheck")
 ProbeIPsFunc = Callable[[list[str], float], Awaitable[dict[str, float | None]]]
+
+
+class SpeedCheckResolverHookConfigModel(PluginConfigModel):
+    timeout_s: float = 0.8
+    max_size: int | None = None
+    ttl_s: float | None = None
+    probe_func: ProbeIPsFunc | None = None
+
+    @field_validator("timeout_s", mode="before")
+    @classmethod
+    def _normalize_timeout_s(cls, value: Any) -> float:
+        return normalize_positive_float(
+            value,
+            key="plugins.speedcheck.SpeedCheckResolverHook.timeout_s",
+        )
+
+    @field_validator("max_size", mode="before")
+    @classmethod
+    def _normalize_max_size(cls, value: Any) -> int | None:
+        if value is None:
+            return None
+        return normalize_positive_int(
+            value,
+            key="plugins.speedcheck.SpeedCheckResolverHook.max_size",
+        )
+
+    @field_validator("ttl_s", mode="before")
+    @classmethod
+    def _normalize_ttl_s(cls, value: Any) -> float | None:
+        if value is None:
+            return None
+        return normalize_positive_float(
+            value,
+            key="plugins.speedcheck.SpeedCheckResolverHook.ttl_s",
+        )
+
+
+class RewriteAnswerByRTTHookConfigModel(PluginConfigModel):
+    max_return_ips: int = 2
+    ttl_s: int = 900
+
+    @field_validator("max_return_ips", mode="before")
+    @classmethod
+    def _normalize_max_return_ips(cls, value: Any) -> int:
+        return normalize_positive_int(
+            value,
+            key="plugins.speedcheck.RewriteAnswerByRTTHook.max_return_ips",
+        )
+
+    @field_validator("ttl_s", mode="before")
+    @classmethod
+    def _normalize_ttl_s(cls, value: Any) -> int:
+        return normalize_positive_int(
+            value,
+            key="plugins.speedcheck.RewriteAnswerByRTTHook.ttl_s",
+        )
+
+    @model_validator(mode="after")
+    def _clamp_ttl_s(self) -> "RewriteAnswerByRTTHookConfigModel":
+        self.ttl_s = max(600, min(900, self.ttl_s))
+        return self
 
 
 class SpeedCheckResolverHook(ResolverHook):
@@ -37,9 +105,16 @@ class SpeedCheckResolverHook(ResolverHook):
         ttl_s: float | None = None,
         probe_func: ProbeIPsFunc | None = None,
     ) -> None:
-        configure(max_size=max_size, ttl_s=ttl_s)
-        self.timeout_s = timeout_s
-        self.probe_func = probe_func or probe_ips
+        raw_config: dict[str, Any] = {
+            "timeout_s": timeout_s,
+            "max_size": max_size,
+            "ttl_s": ttl_s,
+            "probe_func": probe_func,
+        }
+        config = SpeedCheckResolverHookConfigModel.model_validate(raw_config)
+        configure(max_size=config.max_size, ttl_s=config.ttl_s)
+        self.timeout_s = config.timeout_s
+        self.probe_func = config.probe_func or probe_ips
 
     async def on_resolver_result(
         self,
@@ -139,8 +214,14 @@ class RewriteAnswerByRTTHook(ResponseHook):
         max_return_ips: int = 2,
         ttl_s: int = 900,
     ) -> None:
-        self.max_return_ips = max_return_ips
-        self.ttl_s = max(600, min(900, ttl_s))
+        config = RewriteAnswerByRTTHookConfigModel.model_validate(
+            {
+                "max_return_ips": max_return_ips,
+                "ttl_s": ttl_s,
+            }
+        )
+        self.max_return_ips = config.max_return_ips
+        self.ttl_s = config.ttl_s
 
     async def on_response(self, ctx: QueryContext) -> None:
         qname_text = ctx.query.qname.to_text()
@@ -208,6 +289,20 @@ class RewriteAnswerByRTTHook(ResponseHook):
             rewritten.ttl,
             ip_rtt,
         )
+
+
+def normalize_speedcheck_resolver_hook_kwargs(raw_kwargs: Any) -> dict[str, Any]:
+    config = SpeedCheckResolverHookConfigModel.model_validate(
+        {} if raw_kwargs is None else raw_kwargs
+    )
+    return config.model_dump(mode="python", exclude_none=True)
+
+
+def normalize_rewrite_answer_by_rtt_hook_kwargs(raw_kwargs: Any) -> dict[str, Any]:
+    config = RewriteAnswerByRTTHookConfigModel.model_validate(
+        {} if raw_kwargs is None else raw_kwargs
+    )
+    return config.model_dump(mode="python", exclude_none=True)
 
 
 def _should_skip_speedcheck(result: ResolverResult) -> bool:

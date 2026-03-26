@@ -5,16 +5,26 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from ipaddress import ip_address
+from typing import Any, ClassVar
 
 import dns.rdata
 import dns.rdatatype
 import dns.rrset
+from pydantic import field_validator, model_validator
 
 from core.context import QueryContext
 from core.hooks import ResolverHook
 from core.ipset import ipset
 from core.models import ResolverResult
 from logger import get_logger
+from plugins._config import (
+    PluginConfigModel,
+    dump_model_compact,
+    normalize_int_range,
+    normalize_ip_text,
+    normalize_nonempty_string,
+    normalize_string_tuple,
+)
 
 
 logger = get_logger("plugins.ip_rule")
@@ -51,6 +61,170 @@ class _MatchedReplacement:
     ip: str
 
 
+class _ReplacementConfigModel(PluginConfigModel):
+    version: ClassVar[int]
+    tag: str
+    ip: str
+    preserve_prefix_len: int | None = None
+
+    @field_validator("tag", mode="before")
+    @classmethod
+    def _normalize_tag(cls, value: Any) -> str:
+        return normalize_nonempty_string(
+            value,
+            key="ip_rules.rules[*].*.replacements[*].tag",
+        )
+
+    @field_validator("ip", mode="before")
+    @classmethod
+    def _normalize_ip(cls, value: Any) -> str:
+        return normalize_ip_text(
+            value,
+            key="ip_rules.rules[*].*.replacements[*].ip",
+            version=cls.version,
+        )
+
+    @field_validator("preserve_prefix_len", mode="before")
+    @classmethod
+    def _normalize_prefix_len(cls, value: Any) -> int | None:
+        if value is None:
+            return None
+        max_bits = 32 if cls.version == 4 else 128
+        return normalize_int_range(
+            value,
+            key="ip_rules.rules[*].*.replacements[*].preserve_prefix_len",
+            min_value=0,
+            max_value=max_bits,
+        )
+
+
+class _AReplacementConfigModel(_ReplacementConfigModel):
+    version = 4
+
+
+class _AAAAReplacementConfigModel(_ReplacementConfigModel):
+    version = 6
+
+
+class _FamilyConfigModel(PluginConfigModel):
+    replacements: tuple[_ReplacementConfigModel, ...]
+
+    @field_validator("replacements", mode="before")
+    @classmethod
+    def _normalize_replacements(cls, value: Any) -> Any:
+        if isinstance(value, Mapping):
+            return [value]
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+            return list(value)
+        raise ValueError("ip_rules.rules[*].*.replacements 必须是对象或对象列表")
+
+    @model_validator(mode="after")
+    def _validate_unique_tags(self) -> "_FamilyConfigModel":
+        seen_tags: set[str] = set()
+        for replacement in self.replacements:
+            if replacement.tag in seen_tags:
+                raise ValueError(
+                    "ip_rules.rules[*].*.replacements[*].tag 不能重复"
+                )
+            seen_tags.add(replacement.tag)
+        return self
+
+
+class _AFamilyConfigModel(_FamilyConfigModel):
+    replacements: tuple[_AReplacementConfigModel, ...]
+
+
+class _AAAAFamilyConfigModel(_FamilyConfigModel):
+    replacements: tuple[_AAAAReplacementConfigModel, ...]
+
+
+class _IPRuleConfigModel(PluginConfigModel):
+    match_tags: tuple[str, ...]
+    A: _AFamilyConfigModel | None = None
+    AAAA: _AAAAFamilyConfigModel | None = None
+
+    @field_validator("match_tags", mode="before")
+    @classmethod
+    def _normalize_match_tags(cls, value: Any) -> tuple[str, ...]:
+        return normalize_string_tuple(value, key="ip_rules.rules[*].match_tags")
+
+    @model_validator(mode="after")
+    def _validate_sections(self) -> "_IPRuleConfigModel":
+        if self.A is None and self.AAAA is None:
+            raise ValueError("ip_rules.rules[*] 至少需要一个 A/AAAA 配置")
+        return self
+
+
+class IPRuleHookConfigModel(PluginConfigModel):
+    skip_result_tags: tuple[str, ...] = ()
+    rules: tuple[_IPRuleConfigModel, ...] = ()
+
+    @field_validator("skip_result_tags", mode="before")
+    @classmethod
+    def _normalize_skip_result_tags(cls, value: Any) -> tuple[str, ...]:
+        return normalize_string_tuple(
+            value,
+            key="ip_rules.skip_result_tags",
+            allow_none=True,
+        )
+
+    @field_validator("rules", mode="before")
+    @classmethod
+    def _normalize_rules(cls, value: Any) -> Any:
+        if value is None:
+            return ()
+        if isinstance(value, (str, bytes, bytearray)) or not isinstance(value, Sequence):
+            raise ValueError("ip_rules.rules 必须是列表")
+        return list(value)
+
+
+def normalize_ip_rules_config(raw_value: Any) -> dict[str, Any]:
+    config = IPRuleHookConfigModel.model_validate({} if raw_value is None else raw_value)
+    return dump_model_compact(config)
+
+
+def normalize_ip_rule_hook_kwargs(raw_kwargs: Any) -> dict[str, Any]:
+    config = IPRuleHookConfigModel.model_validate({} if raw_kwargs is None else raw_kwargs)
+    return config.model_dump(mode="python", exclude_none=True)
+
+
+def _build_ip_rules(
+    config_rules: Sequence[_IPRuleConfigModel],
+) -> tuple[_IPRule, ...]:
+    normalized: list[_IPRule] = []
+    for rule in config_rules:
+        sections: dict[dns.rdatatype.RdataType, _FamilyRule] = {}
+        if rule.A is not None:
+            sections[dns.rdatatype.A] = _FamilyRule(
+                replacements=tuple(
+                    _ReplacementRule(
+                        tag=replacement.tag,
+                        ip=replacement.ip,
+                        preserve_prefix_len=replacement.preserve_prefix_len,
+                    )
+                    for replacement in rule.A.replacements
+                )
+            )
+        if rule.AAAA is not None:
+            sections[dns.rdatatype.AAAA] = _FamilyRule(
+                replacements=tuple(
+                    _ReplacementRule(
+                        tag=replacement.tag,
+                        ip=replacement.ip,
+                        preserve_prefix_len=replacement.preserve_prefix_len,
+                    )
+                    for replacement in rule.AAAA.replacements
+                )
+            )
+        normalized.append(
+            _IPRule(
+                match_tags=frozenset(rule.match_tags),
+                sections=sections,
+            )
+        )
+    return tuple(normalized)
+
+
 class IPRuleResolverHook(ResolverHook):
     """按 answer.tags 改写上游返回的 A/AAAA 记录。"""
 
@@ -60,12 +234,14 @@ class IPRuleResolverHook(ResolverHook):
         rules: Sequence[Mapping[str, object]] | None = None,
         skip_result_tags: Iterable[str] | None = None,
     ) -> None:
-        self.rules = _normalize_ip_rules(rules or ())
-        self.skip_result_tags = _normalize_tag_names(
-            skip_result_tags,
-            key="ip_rules.skip_result_tags",
-            allow_none=True,
-        )
+        raw_config: dict[str, Any] = {}
+        if rules is not None:
+            raw_config["rules"] = rules
+        if skip_result_tags is not None:
+            raw_config["skip_result_tags"] = skip_result_tags
+        config = IPRuleHookConfigModel.model_validate(raw_config)
+        self.rules = _build_ip_rules(config.rules)
+        self.skip_result_tags = frozenset(config.skip_result_tags)
 
     async def on_resolver_result(
         self,
@@ -141,209 +317,6 @@ def _match_rule_sections(
             continue
         matched.append(section)
     return tuple(matched)
-
-
-def _normalize_ip_rules(
-    raw_rules: Sequence[Mapping[str, object]],
-) -> tuple[_IPRule, ...]:
-    if isinstance(raw_rules, (str, bytes, bytearray)) or not isinstance(raw_rules, Sequence):
-        raise ValueError("ip_rules.rules 必须是列表")
-
-    normalized: list[_IPRule] = []
-    for index, raw_rule in enumerate(raw_rules):
-        if not isinstance(raw_rule, Mapping):
-            raise ValueError(f"ip_rules.rules[{index}] 必须是对象")
-        normalized.append(_normalize_ip_rule(raw_rule, index=index))
-    return tuple(normalized)
-
-
-def _normalize_ip_rule(
-    raw_rule: Mapping[str, object],
-    *,
-    index: int,
-) -> _IPRule:
-    unknown_keys = set(raw_rule) - {"match_tags", "A", "AAAA"}
-    if unknown_keys:
-        raise ValueError(
-            f"ip_rules.rules[{index}] 包含未知字段: {', '.join(sorted(map(str, unknown_keys)))}"
-        )
-
-    match_tags = _normalize_tag_names(
-        raw_rule.get("match_tags"),
-        key=f"ip_rules.rules[{index}].match_tags",
-    )
-    sections: dict[dns.rdatatype.RdataType, _FamilyRule] = {}
-    for qtype_text, qtype in (("A", dns.rdatatype.A), ("AAAA", dns.rdatatype.AAAA)):
-        if qtype_text not in raw_rule:
-            continue
-        raw_section = raw_rule[qtype_text]
-        if not isinstance(raw_section, Mapping):
-            raise ValueError(f"ip_rules.rules[{index}].{qtype_text} 必须是对象")
-        sections[qtype] = _normalize_family_rule(
-            raw_section,
-            qtype=qtype,
-            key=f"ip_rules.rules[{index}].{qtype_text}",
-        )
-
-    if not sections:
-        raise ValueError(f"ip_rules.rules[{index}] 至少需要一个 A/AAAA 配置")
-    return _IPRule(match_tags=match_tags, sections=sections)
-
-
-def _normalize_family_rule(
-    raw_section: Mapping[str, object],
-    *,
-    qtype: dns.rdatatype.RdataType,
-    key: str,
-) -> _FamilyRule:
-    unknown_keys = set(raw_section) - {"replacements"}
-    if unknown_keys:
-        raise ValueError(
-            f"{key} 包含未知字段: {', '.join(sorted(map(str, unknown_keys)))}"
-        )
-
-    replacements = _normalize_replacements(
-        raw_section.get("replacements"),
-        qtype=qtype,
-        key=f"{key}.replacements",
-    )
-    return _FamilyRule(replacements=replacements)
-
-
-def _normalize_replacements(
-    raw_value: object,
-    *,
-    qtype: dns.rdatatype.RdataType,
-    key: str,
-) -> tuple[_ReplacementRule, ...]:
-    if isinstance(raw_value, Mapping):
-        values = [raw_value]
-    elif isinstance(raw_value, Sequence) and not isinstance(raw_value, (str, bytes, bytearray)):
-        values = list(raw_value)
-    else:
-        raise ValueError(f"{key} 必须是对象或对象列表")
-
-    if not values:
-        raise ValueError(f"{key} 至少需要一个 replacement")
-
-    normalized: list[_ReplacementRule] = []
-    seen_tags: set[str] = set()
-    for index, item in enumerate(values):
-        if not isinstance(item, Mapping):
-            raise ValueError(f"{key}[{index}] 必须是对象")
-        replacement = _normalize_replacement(
-            item,
-            qtype=qtype,
-            key=f"{key}[{index}]",
-        )
-        if replacement.tag in seen_tags:
-            raise ValueError(f"{key}[{index}].tag 重复: {replacement.tag}")
-        seen_tags.add(replacement.tag)
-        normalized.append(replacement)
-    return tuple(normalized)
-
-
-def _normalize_replacement(
-    raw_value: Mapping[str, object],
-    *,
-    qtype: dns.rdatatype.RdataType,
-    key: str,
-) -> _ReplacementRule:
-    unknown_keys = set(raw_value) - {"tag", "ip", "preserve_prefix_len"}
-    if unknown_keys:
-        raise ValueError(
-            f"{key} 包含未知字段: {', '.join(sorted(map(str, unknown_keys)))}"
-        )
-
-    raw_tag = raw_value.get("tag")
-    if not isinstance(raw_tag, str) or not raw_tag.strip():
-        raise ValueError(f"{key}.tag 必须是非空字符串")
-    tag = raw_tag.strip()
-
-    ip = _normalize_ip_value(raw_value.get("ip"), qtype=qtype, key=f"{key}.ip")
-    preserve_prefix_len = _normalize_prefix_len(
-        raw_value.get("preserve_prefix_len"),
-        qtype=qtype,
-        key=f"{key}.preserve_prefix_len",
-    )
-    return _ReplacementRule(tag=tag, ip=ip, preserve_prefix_len=preserve_prefix_len)
-
-
-def _normalize_ip_value(
-    raw_value: object,
-    *,
-    qtype: dns.rdatatype.RdataType,
-    key: str,
-) -> str:
-    if not isinstance(raw_value, str) or not raw_value.strip():
-        raise ValueError(f"{key} 必须是非空字符串 IP")
-
-    text = raw_value.strip()
-    expected_qtype = _qtype_for_ip_text(text, key=key)
-    if expected_qtype != qtype:
-        raise ValueError(f"{key} 的 IP 版本与记录类型不匹配")
-    return text
-
-
-def _normalize_prefix_len(
-    raw_value: object,
-    *,
-    qtype: dns.rdatatype.RdataType,
-    key: str,
-) -> int | None:
-    if raw_value is None:
-        return None
-
-    try:
-        value = int(raw_value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"{key} 必须是整数") from exc
-
-    max_bits = 32 if qtype == dns.rdatatype.A else 128
-    if not 0 <= value <= max_bits:
-        raise ValueError(f"{key} 必须在 0 到 {max_bits} 之间")
-    return value
-
-
-def _normalize_tag_names(
-    raw_value: object,
-    *,
-    key: str,
-    allow_none: bool = False,
-) -> frozenset[str]:
-    if raw_value is None and allow_none:
-        return frozenset()
-    if isinstance(raw_value, str):
-        values = [raw_value]
-    elif isinstance(raw_value, Sequence) and not isinstance(raw_value, (str, bytes, bytearray)):
-        values = list(raw_value)
-    else:
-        raise ValueError(f"{key} 必须是字符串或字符串列表")
-
-    normalized: list[str] = []
-    seen: set[str] = set()
-    for index, item in enumerate(values):
-        if not isinstance(item, str) or not item.strip():
-            raise ValueError(f"{key}[{index}] 必须是非空字符串")
-        tag = item.strip()
-        if tag not in seen:
-            seen.add(tag)
-            normalized.append(tag)
-    if not allow_none and not normalized:
-        raise ValueError(f"{key} 至少需要一个 tag")
-    return frozenset(normalized)
-
-
-def _qtype_for_ip_text(
-    ip_text: str,
-    *,
-    key: str,
-) -> dns.rdatatype.RdataType:
-    try:
-        parsed = ip_address(ip_text)
-    except ValueError as exc:
-        raise ValueError(f"{key} 不是合法 IP: {ip_text}") from exc
-    return dns.rdatatype.A if parsed.version == 4 else dns.rdatatype.AAAA
 
 
 def _rewrite_rrset(
