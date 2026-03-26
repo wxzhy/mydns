@@ -1,8 +1,11 @@
 # mydns 示例配置（可通过 main.py --config 加载）
 
 server:
+  # udp/tcp 控制监听协议；至少开启一个。
   host: 127.0.0.1
   port: 5335
+  udp: true
+  tcp: true
 
 pipeline:
   upstream_timeout_s: 2

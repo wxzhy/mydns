@@ -31,6 +31,8 @@ class TestConfig(unittest.TestCase):
 
         self.assertEqual(runtime.server.host, "127.0.0.1")
         self.assertEqual(runtime.server.port, 5335)
+        self.assertTrue(runtime.server.udp)
+        self.assertFalse(runtime.server.tcp)
         self.assertAlmostEqual(runtime.pipeline.upstream_timeout_s, 0.8)
         self.assertGreaterEqual(len(runtime.pipeline.resolver_manager.resolvers), 1)
         self.assertIsInstance(runtime.pipeline.request_hooks[0], NoopRequestHook)
@@ -40,6 +42,8 @@ class TestConfig(unittest.TestCase):
         server:
           host: 0.0.0.0
           port: 1053
+          udp: false
+          tcp: true
         pipeline:
           upstream_timeout_s: 1.2
         resolvers:
@@ -68,6 +72,8 @@ class TestConfig(unittest.TestCase):
 
         self.assertEqual(runtime.server.host, "0.0.0.0")
         self.assertEqual(runtime.server.port, 1053)
+        self.assertFalse(runtime.server.udp)
+        self.assertTrue(runtime.server.tcp)
         self.assertAlmostEqual(runtime.pipeline.upstream_timeout_s, 1.2)
         self.assertEqual(len(runtime.pipeline.resolver_manager.resolvers), 2)
         self.assertIsInstance(runtime.pipeline.resolver_manager.resolvers[0], UdpUpstreamResolver)
@@ -106,6 +112,17 @@ class TestConfig(unittest.TestCase):
         self.assertIsInstance(hook, SpeedCheckResolverHook)
         self.assertAlmostEqual(hook.timeout_s, 0.3)
         self.assertEqual(get_probe_cache_config(), (10000, 3600.0))
+
+    def test_server_udp_and_tcp_cannot_both_be_disabled(self) -> None:
+        raw = {
+            "server": {
+                "udp": False,
+                "tcp": False,
+            }
+        }
+
+        with self.assertRaisesRegex(ValueError, "不能同时为 false"):
+            build_runtime_config(raw)
 
     def test_https_record_response_hook_should_load_with_defaults(self) -> None:
         content = """

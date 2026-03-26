@@ -31,6 +31,8 @@ class ServerConfig:
 
     host: str = "127.0.0.1"
     port: int = 5335
+    udp: bool = True
+    tcp: bool = False
 
 
 @dataclass(slots=True)
@@ -95,7 +97,11 @@ def build_runtime_config(
     server = ServerConfig(
         host=str(server_section.get("host", "127.0.0.1")),
         port=int(server_section.get("port", 5335)),
+        udp=_normalize_bool(server_section.get("udp", True), key="server.udp"),
+        tcp=_normalize_bool(server_section.get("tcp", False), key="server.tcp"),
     )
+    if not server.udp and not server.tcp:
+        raise ValueError("server.udp 与 server.tcp 不能同时为 false")
     upstream_timeout_s = float(pipeline_section.get("upstream_timeout_s", 0.8))
 
     resolvers_raw = raw.get("resolvers")
@@ -530,6 +536,12 @@ def _normalize_optional_path(raw_value: Any, *, key: str) -> str | None:
     if not value:
         return None
     return value
+
+
+def _normalize_bool(raw_value: Any, *, key: str) -> bool:
+    if isinstance(raw_value, bool):
+        return raw_value
+    raise ValueError(f"{key} 必须是布尔值")
 
 
 def _validate_rule_tags(
