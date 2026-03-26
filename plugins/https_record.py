@@ -14,7 +14,6 @@ import dns.rdatatype
 import dns.rrset
 from async_lru import alru_cache
 from dns.rdtypes import svcbbase
-from pydantic import field_validator
 
 from core.answer import Answer
 from core.context import QueryContext
@@ -22,7 +21,7 @@ from core.hooks import ResponseHook
 from core.ipset import ipset
 from core.models import Query
 from logger import get_logger
-from plugins._config import PluginConfigModel, normalize_string_tuple
+from plugins._config import OptionalStrSet, PluginConfigModel
 
 if TYPE_CHECKING:
     from core.pipeline import Pipeline
@@ -36,26 +35,8 @@ _ECH_CACHE_MAX_SIZE = 16
 
 
 class HttpsRecordResponseHookConfigModel(PluginConfigModel):
-    skip_result_tags: tuple[str, ...] = ()
-    cloudflare_tags: tuple[str, ...] = ("cloudflare",)
-
-    @field_validator("skip_result_tags", mode="before")
-    @classmethod
-    def _normalize_skip_result_tags(cls, value: Any) -> tuple[str, ...]:
-        return normalize_string_tuple(
-            value,
-            key="plugins.https_record.HttpsRecordResponseHook.skip_result_tags",
-            allow_none=True,
-        )
-
-    @field_validator("cloudflare_tags", mode="before")
-    @classmethod
-    def _normalize_cloudflare_tags(cls, value: Any) -> tuple[str, ...]:
-        return normalize_string_tuple(
-            value,
-            key="plugins.https_record.HttpsRecordResponseHook.cloudflare_tags",
-            allow_none=True,
-        )
+    skip_result_tags: OptionalStrSet = set()
+    cloudflare_tags: OptionalStrSet = {"cloudflare"}
 
 
 class HttpsRecordResponseHook(ResponseHook):

@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from importlib import import_module
+from ipaddress import IPv4Address, IPv4Network, IPv6Address, IPv6Network
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 from collections.abc import Mapping, Sequence
 
@@ -13,10 +14,14 @@ import dns.edns
 import yaml
 from pydantic import (
     BaseModel,
+    BeforeValidator,
     ConfigDict,
     Field,
+    IPvAnyAddress,
+    IPvAnyNetwork,
+    NonNegativeInt,
+    PositiveFloat,
     StrictBool,
-    ValidationInfo,
     field_validator,
     model_validator,
 )
@@ -35,6 +40,12 @@ from plugins.ip_rule import normalize_ip_rule_hook_kwargs, normalize_ip_rules_co
 from plugins.speedcheck import (
     normalize_rewrite_answer_by_rtt_hook_kwargs,
     normalize_speedcheck_resolver_hook_kwargs,
+)
+from plugins._config import (
+    NonEmptyStr,
+    NonEmptyStrList,
+    OptionalStrSet,
+    PortNumber,
 )
 from resolver.resolver import Resolver
 
@@ -139,28 +150,46 @@ _DEFAULT_RESOLVERS = [
 ]
 
 
+def _blank_string_to_none(value: Any) -> Any:
+    if isinstance(value, str) and not value.strip():
+        return None
+    return value
+
+
+def _mapping_or_empty(value: Any) -> Any:
+    if value is None:
+        return {}
+    return value
+
+
+MaybeNonEmptyStr = Annotated[NonEmptyStr | None, BeforeValidator(_blank_string_to_none)]
+TaggedPathMap = Annotated[
+    dict[NonEmptyStr, NonEmptyStrList],
+    BeforeValidator(_mapping_or_empty),
+]
+
+
+class _ECSStringConfigModel(BaseModel):
+    value: IPvAnyAddress | IPvAnyNetwork
+
+
+class _ECSMappingConfigModel(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    address: IPvAnyAddress
+    srclen: NonNegativeInt | None = None
+    scopelen: NonNegativeInt = 0
+
+
 class ServerConfig(BaseModel):
     """服务监听配置。"""
 
     model_config = ConfigDict(extra="ignore")
 
-    host: str = "127.0.0.1"
-    port: int = 5335
+    host: NonEmptyStr = "127.0.0.1"
+    port: PortNumber = 5335
     udp: StrictBool = True
     tcp: StrictBool = False
-
-    @field_validator("host", mode="before")
-    @classmethod
-    def _normalize_host(cls, value: Any) -> str:
-        return _normalize_nonempty_string(value, key="server.host")
-
-    @field_validator("port", mode="before")
-    @classmethod
-    def _normalize_port(cls, value: Any) -> int:
-        try:
-            return int(value)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("server.port 必须是整数") from exc
 
     @model_validator(mode="after")
     def _validate_protocols(self) -> "ServerConfig":
@@ -172,18 +201,7 @@ class ServerConfig(BaseModel):
 class PipelineConfigModel(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
-    upstream_timeout_s: float = 0.8
-
-    @field_validator("upstream_timeout_s", mode="before")
-    @classmethod
-    def _normalize_timeout(cls, value: Any) -> float:
-        try:
-            timeout = float(value)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("pipeline.upstream_timeout_s 必须是正数") from exc
-        if timeout <= 0:
-            raise ValueError("pipeline.upstream_timeout_s 必须是正数")
-        return timeout
+    upstream_timeout_s: PositiveFloat = 0.8
 
 
 class HookSpecModel(BaseModel):
@@ -191,7 +209,7 @@ class HookSpecModel(BaseModel):
 
     model_config = ConfigDict(populate_by_name=True, extra="ignore")
 
-    class_path: str = Field(alias="class")
+    class_path: NonEmptyStr = Field(alias="class")
     kwargs: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="before")
@@ -211,11 +229,6 @@ class HookSpecModel(BaseModel):
             raise ValueError("hook.kwargs 必须是对象")
         return data
 
-    @field_validator("class_path", mode="before")
-    @classmethod
-    def _normalize_class_path(cls, value: Any) -> str:
-        return _normalize_nonempty_string(value, key="hook.class")
-
 
 class HooksConfigModel(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -234,12 +247,12 @@ class ResolverSpecModel(BaseModel):
         arbitrary_types_allowed=True,
     )
 
-    type: str | None = None
-    class_path: str | None = Field(default=None, alias="class")
+    type: NonEmptyStr | None = None
+    class_path: NonEmptyStr | None = Field(default=None, alias="class")
     kwargs: dict[str, Any] = Field(default_factory=dict)
-    name: str | None = None
-    tags: set[str] | None = None
-    timeout: float | None = None
+    name: NonEmptyStr | None = None
+    tags: OptionalStrSet | None = None
+    timeout: PositiveFloat | None = None
     ecs: dns.edns.ECSOption | None = None
 
     @model_validator(mode="before")
@@ -257,47 +270,6 @@ class ResolverSpecModel(BaseModel):
             else:
                 raise ValueError("resolvers[*].kwargs 必须是对象")
         return data
-
-    @field_validator("type", mode="before")
-    @classmethod
-    def _normalize_type(cls, value: Any) -> str | None:
-        if value is None:
-            return None
-        return _normalize_nonempty_string(value, key="resolvers[*].type")
-
-    @field_validator("class_path", mode="before")
-    @classmethod
-    def _normalize_class_path(cls, value: Any) -> str | None:
-        if value is None:
-            return None
-        return _normalize_nonempty_string(value, key="resolvers[*].class")
-
-    @field_validator("name", mode="before")
-    @classmethod
-    def _normalize_name(cls, value: Any) -> str | None:
-        if value is None:
-            return None
-        return _normalize_nonempty_string(value, key="resolvers[*].name")
-
-    @field_validator("tags", mode="before")
-    @classmethod
-    def _normalize_tags(cls, value: Any) -> set[str] | None:
-        if value is None:
-            return None
-        return set(_normalize_string_list(value, key="resolvers[*].tags"))
-
-    @field_validator("timeout", mode="before")
-    @classmethod
-    def _normalize_timeout(cls, value: Any) -> float | None:
-        if value is None:
-            return None
-        try:
-            timeout = float(value)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("resolvers[*].timeout 必须是正数") from exc
-        if timeout <= 0:
-            raise ValueError("resolvers[*].timeout 必须是正数")
-        return timeout
 
     @field_validator("ecs", mode="before")
     @classmethod
@@ -352,20 +324,11 @@ class RawRuntimeConfigModel(BaseModel):
     pipeline: PipelineConfigModel = Field(default_factory=PipelineConfigModel)
     resolvers: list[ResolverSpecModel] | None = None
     hooks: HooksConfigModel = Field(default_factory=HooksConfigModel)
-    domainset: dict[str, list[str]] = Field(default_factory=dict)
+    domainset: TaggedPathMap = Field(default_factory=dict)
     domain_rules: dict[str, Any] = Field(default_factory=dict)
-    ipset: dict[str, list[str]] = Field(default_factory=dict)
+    ipset: TaggedPathMap = Field(default_factory=dict)
     ip_rules: dict[str, Any] = Field(default_factory=dict)
-    domainset_cache_file: str | None = None
-
-    @field_validator("domainset", "ipset", mode="before")
-    @classmethod
-    def _normalize_tagged_paths(
-        cls,
-        value: Any,
-        info: ValidationInfo,
-    ) -> dict[str, list[str]]:
-        return _normalize_tagged_path_mapping(value, key=info.field_name)
+    domainset_cache_file: MaybeNonEmptyStr = None
 
     @field_validator("domain_rules", mode="before")
     @classmethod
@@ -376,16 +339,6 @@ class RawRuntimeConfigModel(BaseModel):
     @classmethod
     def _normalize_ip_rules(cls, value: Any) -> dict[str, Any]:
         return normalize_ip_rules_config(value)
-
-    @field_validator("domainset_cache_file", mode="before")
-    @classmethod
-    def _normalize_cache_file(cls, value: Any) -> str | None:
-        if value is None:
-            return None
-        if not isinstance(value, str):
-            raise ValueError("domainset_cache_file 必须是字符串路径")
-        normalized = value.strip()
-        return normalized or None
 
     def effective_resolver_specs(self) -> list[ResolverSpecModel]:
         if self.resolvers is not None:
@@ -670,98 +623,23 @@ def _normalize_hook_kwargs(class_path: str, raw_kwargs: dict[str, Any]) -> dict[
     return normalizer(kwargs)
 
 
-def _normalize_tagged_path_mapping(raw_value: Any, *, key: str) -> dict[str, list[str]]:
-    if raw_value is None:
-        return {}
-    if not isinstance(raw_value, Mapping):
-        raise ValueError(f"{key} 必须是对象")
-
-    normalized: dict[str, list[str]] = {}
-    for raw_tag, raw_paths in raw_value.items():
-        tag = _normalize_nonempty_string(raw_tag, key=f"{key}.<tag>")
-        normalized[tag] = _normalize_path_list(raw_paths, key=f"{key}.{tag}")
-    return normalized
-
-
-def _normalize_nonempty_string(raw_value: Any, *, key: str) -> str:
-    if not isinstance(raw_value, str):
-        raise ValueError(f"{key} 必须是非空字符串")
-    value = raw_value.strip()
-    if not value:
-        raise ValueError(f"{key} 必须是非空字符串")
-    return value
-
-
-def _normalize_string_list(
-    raw_value: Any,
-    *,
-    key: str,
-    allow_none: bool = False,
-) -> list[str]:
-    if raw_value is None and allow_none:
-        return []
-    if isinstance(raw_value, str):
-        values = [raw_value]
-    elif isinstance(raw_value, Sequence) and not isinstance(raw_value, (str, bytes, bytearray)):
-        values = list(raw_value)
-    else:
-        raise ValueError(f"{key} 必须是字符串或字符串列表")
-
-    normalized: list[str] = []
-    seen: set[str] = set()
-    for index, item in enumerate(values):
-        tag = _normalize_nonempty_string(item, key=f"{key}[{index}]")
-        if tag not in seen:
-            seen.add(tag)
-            normalized.append(tag)
-    if not allow_none and not normalized:
-        raise ValueError(f"{key} 至少需要一个 tag")
-    return normalized
-
-
-def _normalize_path_list(raw_value: Any, *, key: str) -> list[str]:
-    if isinstance(raw_value, str):
-        values = [raw_value]
-    elif isinstance(raw_value, Sequence) and not isinstance(raw_value, (str, bytes, bytearray)):
-        values = list(raw_value)
-    else:
-        raise ValueError(f"{key} 必须是字符串或字符串列表")
-
-    normalized: list[str] = []
-    for index, item in enumerate(values):
-        normalized.append(_normalize_nonempty_string(item, key=f"{key}[{index}]"))
-    return normalized
-
-
 def _parse_ecs_option(raw_value: Any, *, key: str) -> dns.edns.ECSOption:
-    if isinstance(raw_value, str):
-        value = raw_value.strip()
-        if not value:
-            raise ValueError(f"{key} 不能为空")
-        try:
-            return dns.edns.ECSOption.from_text(value)
-        except ValueError:
-            try:
-                return dns.edns.ECSOption(value)
-            except Exception as exc:
-                raise ValueError(f"{key} 不是合法的 ECS 配置") from exc
-
     if isinstance(raw_value, Mapping):
-        address = _normalize_nonempty_string(raw_value.get("address"), key=f"{key}.address")
-        srclen = raw_value.get("srclen")
-        scopelen = raw_value.get("scopelen", 0)
-        try:
-            parsed_srclen = None if srclen is None else int(srclen)
-            parsed_scopelen = int(scopelen)
-            return dns.edns.ECSOption(
-                address,
-                srclen=parsed_srclen,
-                scopelen=parsed_scopelen,
-            )
-        except Exception as exc:
-            raise ValueError(f"{key} 不是合法的 ECS 配置") from exc
+        _ = key
+        parsed = _ECSMappingConfigModel.model_validate(raw_value)
+        return dns.edns.ECSOption(
+            str(parsed.address),
+            srclen=parsed.srclen,
+            scopelen=parsed.scopelen,
+        )
 
-    raise ValueError(f"{key} 必须是字符串或对象")
+    _ = key
+    parsed = _ECSStringConfigModel.model_validate({"value": raw_value}).value
+    if isinstance(parsed, (IPv4Network, IPv6Network)):
+        return dns.edns.ECSOption.from_text(str(parsed))
+    if isinstance(parsed, (IPv4Address, IPv6Address)):
+        return dns.edns.ECSOption(str(parsed))
+    raise TypeError("unreachable")
 
 
 def _find_hooks(specs: Sequence[HookSpecModel], *, class_path: str) -> list[HookSpecModel]:

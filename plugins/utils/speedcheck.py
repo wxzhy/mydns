@@ -9,10 +9,10 @@ from typing import Any
 
 from async_lru import alru_cache
 from icmplib import async_ping
-from pydantic import field_validator
+from pydantic import PositiveFloat, PositiveInt
 
 from logger import get_logger
-from plugins._config import PluginConfigModel, normalize_positive_float, normalize_positive_int
+from plugins._config import PluginConfigModel
 
 logger = get_logger("plugins.utils.speedcheck")
 
@@ -24,18 +24,8 @@ _probe_cache_ttl_s = DEFAULT_PROBE_CACHE_TTL_S
 
 
 class ProbeCacheConfigModel(PluginConfigModel):
-    max_size: int = DEFAULT_PROBE_CACHE_MAX_SIZE
-    ttl_s: float = DEFAULT_PROBE_CACHE_TTL_S
-
-    @field_validator("max_size", mode="before")
-    @classmethod
-    def _normalize_max_size(cls, value: Any) -> int:
-        return normalize_positive_int(value, key="speedcheck cache max_size")
-
-    @field_validator("ttl_s", mode="before")
-    @classmethod
-    def _normalize_ttl_s(cls, value: Any) -> float:
-        return normalize_positive_float(value, key="speedcheck cache ttl_s")
+    max_size: PositiveInt = DEFAULT_PROBE_CACHE_MAX_SIZE
+    ttl_s: PositiveFloat = DEFAULT_PROBE_CACHE_TTL_S
 
 
 async def probe_ips(

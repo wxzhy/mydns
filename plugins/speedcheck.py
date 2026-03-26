@@ -13,7 +13,7 @@ import dns.rdata
 import dns.rdataclass
 import dns.rdatatype
 import dns.rrset
-from pydantic import field_validator, model_validator
+from pydantic import PositiveFloat, PositiveInt, model_validator
 
 from core.answer import Answer
 from core.context import QueryContext
@@ -22,8 +22,6 @@ from core.models import ResolverResult
 from logger import get_logger
 from plugins._config import (
     PluginConfigModel,
-    normalize_positive_float,
-    normalize_positive_int,
 )
 from plugins.utils.speedcheck import configure, probe_ips
 from upstream.selector import select_best_answer
@@ -34,59 +32,15 @@ ProbeIPsFunc = Callable[[list[str], float], Awaitable[dict[str, float | None]]]
 
 
 class SpeedCheckResolverHookConfigModel(PluginConfigModel):
-    timeout_s: float = 0.8
-    max_size: int | None = None
-    ttl_s: float | None = None
+    timeout_s: PositiveFloat = 0.8
+    max_size: PositiveInt | None = None
+    ttl_s: PositiveFloat | None = None
     probe_func: ProbeIPsFunc | None = None
-
-    @field_validator("timeout_s", mode="before")
-    @classmethod
-    def _normalize_timeout_s(cls, value: Any) -> float:
-        return normalize_positive_float(
-            value,
-            key="plugins.speedcheck.SpeedCheckResolverHook.timeout_s",
-        )
-
-    @field_validator("max_size", mode="before")
-    @classmethod
-    def _normalize_max_size(cls, value: Any) -> int | None:
-        if value is None:
-            return None
-        return normalize_positive_int(
-            value,
-            key="plugins.speedcheck.SpeedCheckResolverHook.max_size",
-        )
-
-    @field_validator("ttl_s", mode="before")
-    @classmethod
-    def _normalize_ttl_s(cls, value: Any) -> float | None:
-        if value is None:
-            return None
-        return normalize_positive_float(
-            value,
-            key="plugins.speedcheck.SpeedCheckResolverHook.ttl_s",
-        )
 
 
 class RewriteAnswerByRTTHookConfigModel(PluginConfigModel):
-    max_return_ips: int = 2
-    ttl_s: int = 900
-
-    @field_validator("max_return_ips", mode="before")
-    @classmethod
-    def _normalize_max_return_ips(cls, value: Any) -> int:
-        return normalize_positive_int(
-            value,
-            key="plugins.speedcheck.RewriteAnswerByRTTHook.max_return_ips",
-        )
-
-    @field_validator("ttl_s", mode="before")
-    @classmethod
-    def _normalize_ttl_s(cls, value: Any) -> int:
-        return normalize_positive_int(
-            value,
-            key="plugins.speedcheck.RewriteAnswerByRTTHook.ttl_s",
-        )
+    max_return_ips: PositiveInt = 2
+    ttl_s: PositiveInt = 900
 
     @model_validator(mode="after")
     def _clamp_ttl_s(self) -> "RewriteAnswerByRTTHookConfigModel":

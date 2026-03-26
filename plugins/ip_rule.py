@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from ipaddress import ip_address
-from typing import Any, ClassVar
+from ipaddress import IPv4Address, IPv6Address, ip_address
+from typing import Annotated, Any, ClassVar
 
 import dns.rdata
 import dns.rdatatype
 import dns.rrset
-from pydantic import field_validator, model_validator
+from pydantic import BeforeValidator, model_validator
 
 from core.context import QueryContext
 from core.hooks import ResolverHook
@@ -18,16 +18,29 @@ from core.ipset import ipset
 from core.models import ResolverResult
 from logger import get_logger
 from plugins._config import (
+    IPv4PrefixLen,
+    IPv6PrefixLen,
+    NonEmptyStr,
+    NonEmptyStrSet,
+    OptionalStrSet,
     PluginConfigModel,
     dump_model_compact,
-    normalize_int_range,
-    normalize_ip_text,
-    normalize_nonempty_string,
-    normalize_string_tuple,
 )
 
 
 logger = get_logger("plugins.ip_rule")
+
+
+def _coerce_mapping_or_list(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return [value]
+    return value
+
+
+def _coerce_sequence_or_empty(value: Any) -> Any:
+    if value is None:
+        return ()
+    return value
 
 
 @dataclass(slots=True, frozen=True)
@@ -63,60 +76,27 @@ class _MatchedReplacement:
 
 class _ReplacementConfigModel(PluginConfigModel):
     version: ClassVar[int]
-    tag: str
-    ip: str
-    preserve_prefix_len: int | None = None
-
-    @field_validator("tag", mode="before")
-    @classmethod
-    def _normalize_tag(cls, value: Any) -> str:
-        return normalize_nonempty_string(
-            value,
-            key="ip_rules.rules[*].*.replacements[*].tag",
-        )
-
-    @field_validator("ip", mode="before")
-    @classmethod
-    def _normalize_ip(cls, value: Any) -> str:
-        return normalize_ip_text(
-            value,
-            key="ip_rules.rules[*].*.replacements[*].ip",
-            version=cls.version,
-        )
-
-    @field_validator("preserve_prefix_len", mode="before")
-    @classmethod
-    def _normalize_prefix_len(cls, value: Any) -> int | None:
-        if value is None:
-            return None
-        max_bits = 32 if cls.version == 4 else 128
-        return normalize_int_range(
-            value,
-            key="ip_rules.rules[*].*.replacements[*].preserve_prefix_len",
-            min_value=0,
-            max_value=max_bits,
-        )
+    tag: NonEmptyStr
+    ip: object
 
 
 class _AReplacementConfigModel(_ReplacementConfigModel):
     version = 4
+    ip: IPv4Address
+    preserve_prefix_len: IPv4PrefixLen | None = None
 
 
 class _AAAAReplacementConfigModel(_ReplacementConfigModel):
     version = 6
+    ip: IPv6Address
+    preserve_prefix_len: IPv6PrefixLen | None = None
 
 
 class _FamilyConfigModel(PluginConfigModel):
-    replacements: tuple[_ReplacementConfigModel, ...]
-
-    @field_validator("replacements", mode="before")
-    @classmethod
-    def _normalize_replacements(cls, value: Any) -> Any:
-        if isinstance(value, Mapping):
-            return [value]
-        if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-            return list(value)
-        raise ValueError("ip_rules.rules[*].*.replacements 必须是对象或对象列表")
+    replacements: Annotated[
+        tuple[_ReplacementConfigModel, ...],
+        BeforeValidator(_coerce_mapping_or_list),
+    ]
 
     @model_validator(mode="after")
     def _validate_unique_tags(self) -> "_FamilyConfigModel":
@@ -139,14 +119,9 @@ class _AAAAFamilyConfigModel(_FamilyConfigModel):
 
 
 class _IPRuleConfigModel(PluginConfigModel):
-    match_tags: tuple[str, ...]
+    match_tags: NonEmptyStrSet
     A: _AFamilyConfigModel | None = None
     AAAA: _AAAAFamilyConfigModel | None = None
-
-    @field_validator("match_tags", mode="before")
-    @classmethod
-    def _normalize_match_tags(cls, value: Any) -> tuple[str, ...]:
-        return normalize_string_tuple(value, key="ip_rules.rules[*].match_tags")
 
     @model_validator(mode="after")
     def _validate_sections(self) -> "_IPRuleConfigModel":
@@ -156,26 +131,11 @@ class _IPRuleConfigModel(PluginConfigModel):
 
 
 class IPRuleHookConfigModel(PluginConfigModel):
-    skip_result_tags: tuple[str, ...] = ()
-    rules: tuple[_IPRuleConfigModel, ...] = ()
-
-    @field_validator("skip_result_tags", mode="before")
-    @classmethod
-    def _normalize_skip_result_tags(cls, value: Any) -> tuple[str, ...]:
-        return normalize_string_tuple(
-            value,
-            key="ip_rules.skip_result_tags",
-            allow_none=True,
-        )
-
-    @field_validator("rules", mode="before")
-    @classmethod
-    def _normalize_rules(cls, value: Any) -> Any:
-        if value is None:
-            return ()
-        if isinstance(value, (str, bytes, bytearray)) or not isinstance(value, Sequence):
-            raise ValueError("ip_rules.rules 必须是列表")
-        return list(value)
+    skip_result_tags: OptionalStrSet = set()
+    rules: Annotated[
+        tuple[_IPRuleConfigModel, ...],
+        BeforeValidator(_coerce_sequence_or_empty),
+    ] = ()
 
 
 def normalize_ip_rules_config(raw_value: Any) -> dict[str, Any]:
@@ -199,7 +159,7 @@ def _build_ip_rules(
                 replacements=tuple(
                     _ReplacementRule(
                         tag=replacement.tag,
-                        ip=replacement.ip,
+                        ip=str(replacement.ip),
                         preserve_prefix_len=replacement.preserve_prefix_len,
                     )
                     for replacement in rule.A.replacements
@@ -210,7 +170,7 @@ def _build_ip_rules(
                 replacements=tuple(
                     _ReplacementRule(
                         tag=replacement.tag,
-                        ip=replacement.ip,
+                        ip=str(replacement.ip),
                         preserve_prefix_len=replacement.preserve_prefix_len,
                     )
                     for replacement in rule.AAAA.replacements

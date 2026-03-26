@@ -4,14 +4,14 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Annotated, Any, Literal
 
 import dns.rcode
 import dns.rdata
 import dns.rdataclass
 import dns.rdatatype
 import dns.rrset
-from pydantic import Field, field_validator, model_validator
+from pydantic import BeforeValidator, Field, PositiveInt, model_validator
 
 from core.answer import Answer
 from core.context import QueryContext
@@ -19,11 +19,11 @@ from core.domainset import domainset
 from core.hooks import RequestHook
 from logger import get_logger
 from plugins._config import (
+    IPv4AddressList,
+    IPv6AddressList,
+    NonEmptyStr,
     PluginConfigModel,
     dump_model_compact,
-    normalize_ip_tuple,
-    normalize_nonempty_string,
-    normalize_positive_int,
 )
 
 
@@ -34,6 +34,22 @@ _LOCALHOST_AAAA = "::1"
 _DEFAULT_TTL_S = 24 * 60 * 60
 
 
+def _normalize_domain_rule_action(value: Any) -> Any:
+    if isinstance(value, str):
+        return value.strip().lower()
+    return value
+
+
+DomainRuleAction = Annotated[
+    Literal["intercept", "hosts"],
+    BeforeValidator(_normalize_domain_rule_action),
+]
+DomainRuleConfigMap = Annotated[
+    dict[NonEmptyStr, "_DomainRuleConfigModel"],
+    BeforeValidator(lambda value: {} if value is None else value),
+]
+
+
 @dataclass(slots=True, frozen=True)
 class _DomainRule:
     action: str
@@ -42,10 +58,10 @@ class _DomainRule:
 
 
 class _DomainRuleConfigModel(PluginConfigModel):
-    action: str
-    ttl_s: int = _DEFAULT_TTL_S
-    A: tuple[str, ...] = ()
-    AAAA: tuple[str, ...] = ()
+    action: DomainRuleAction
+    ttl_s: PositiveInt = _DEFAULT_TTL_S
+    A: IPv4AddressList = Field(default_factory=list)
+    AAAA: IPv6AddressList = Field(default_factory=list)
 
     @model_validator(mode="before")
     @classmethod
@@ -61,30 +77,6 @@ class _DomainRuleConfigModel(PluginConfigModel):
         data.pop("mode", None)
         return data
 
-    @field_validator("action", mode="before")
-    @classmethod
-    def _normalize_action(cls, value: Any) -> str:
-        action = normalize_nonempty_string(value, key="domain_rules.<tag>.action")
-        normalized = action.lower()
-        if normalized not in {"intercept", "hosts"}:
-            raise ValueError("domain_rules.<tag>.action 仅支持 intercept 或 hosts")
-        return normalized
-
-    @field_validator("ttl_s", mode="before")
-    @classmethod
-    def _normalize_ttl_s(cls, value: Any) -> int:
-        return normalize_positive_int(value, key="domain_rules.<tag>.ttl_s")
-
-    @field_validator("A", mode="before")
-    @classmethod
-    def _normalize_a_records(cls, value: Any) -> tuple[str, ...]:
-        return normalize_ip_tuple(value, key="domain_rules.<tag>.A", version=4)
-
-    @field_validator("AAAA", mode="before")
-    @classmethod
-    def _normalize_aaaa_records(cls, value: Any) -> tuple[str, ...]:
-        return normalize_ip_tuple(value, key="domain_rules.<tag>.AAAA", version=6)
-
     @model_validator(mode="after")
     def _validate_hosts_records(self) -> "_DomainRuleConfigModel":
         if self.action == "hosts" and not self.A and not self.AAAA:
@@ -93,21 +85,7 @@ class _DomainRuleConfigModel(PluginConfigModel):
 
 
 class DomainRuleHookConfigModel(PluginConfigModel):
-    rules: dict[str, _DomainRuleConfigModel] = Field(default_factory=dict)
-
-    @field_validator("rules", mode="before")
-    @classmethod
-    def _normalize_rules(cls, value: Any) -> dict[str, Any]:
-        if value is None:
-            return {}
-        if not isinstance(value, Mapping):
-            raise ValueError("domain_rules 必须是对象")
-
-        normalized: dict[str, Any] = {}
-        for raw_tag, raw_rule in value.items():
-            tag = normalize_nonempty_string(raw_tag, key="domain_rules.<tag>")
-            normalized[tag] = raw_rule
-        return normalized
+    rules: DomainRuleConfigMap = Field(default_factory=dict)
 
 
 class DomainRuleRequestHook(RequestHook):
@@ -206,9 +184,9 @@ def _build_domain_host_records(
 ) -> dict[dns.rdatatype.RdataType, tuple[str, ...]]:
     records: dict[dns.rdatatype.RdataType, tuple[str, ...]] = {}
     if rule.A:
-        records[dns.rdatatype.A] = rule.A
+        records[dns.rdatatype.A] = tuple(str(ip) for ip in rule.A)
     if rule.AAAA:
-        records[dns.rdatatype.AAAA] = rule.AAAA
+        records[dns.rdatatype.AAAA] = tuple(str(ip) for ip in rule.AAAA)
     return records
 
 
