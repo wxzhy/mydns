@@ -10,7 +10,6 @@ import dns.rdata
 import dns.rdatatype
 import dns.rrset
 
-from core.answer import Answer
 from core.context import QueryContext
 from core.hooks import ResolverHook
 from core.ipset import ipset
@@ -37,6 +36,19 @@ class _ReplacementRule:
 class _IPRule:
     match_tags: frozenset[str]
     sections: dict[dns.rdatatype.RdataType, _FamilyRule]
+
+
+@dataclass(slots=True, frozen=True)
+class _RewriteResult:
+    ips: tuple[str, ...]
+    changed: bool
+    matched_tags: tuple[str, ...]
+
+
+@dataclass(slots=True, frozen=True)
+class _MatchedReplacement:
+    tag: str
+    ip: str
 
 
 class IPRuleResolverHook(ResolverHook):
@@ -77,61 +89,58 @@ class IPRuleResolverHook(ResolverHook):
             )
             return result
 
-        rule = _select_ip_rule(answer.tags, self.rules)
-        if rule is None:
-            return result
-
-        section, source_ips = _select_ip_rule_inputs(
-            answer=answer,
-            qtype=ctx.query.qtype,
-            rule=rule,
-        )
-        if section is None or not source_ips:
-            return result
-
-        rewritten_ips = _rewrite_ips(source_ips, section)
-        if rewritten_ips == source_ips:
-            return result
-
         rrset = answer.rrset
-        assert rrset is not None
+        if rrset is None or rrset.rdtype not in {dns.rdatatype.A, dns.rdatatype.AAAA}:
+            return result
+
+        matched_sections = _match_rule_sections(
+            answer.tags,
+            rrset.rdtype,
+            self.rules,
+        )
+        if not matched_sections:
+            return result
+
+        # 对 rrset 中的每条地址记录独立处理：命中则写入新 rrset，重复 tag 跳过。
+        rewrite_result = _rewrite_rrset(rrset, matched_sections)
+        if not rewrite_result.changed:
+            return result
+
         rewritten = _build_ip_rrset(
             owner_name=rrset.name,
             rdclass=answer.rdclass,
-            qtype=ctx.query.qtype,
-            ips=rewritten_ips,
+            qtype=rrset.rdtype,
+            ips=list(rewrite_result.ips),
             ttl_s=rrset.ttl,
         )
         answer.replace_rrset(rewritten, preserve_expiration=answer.expiration)
         logger.debug(
-            "应答IP规则改写 resolver=%s qname=%s qtype=%s match_tags=%s result_tags=%s result_ips=%s",
+            "应答IP规则改写 resolver=%s qname=%s qtype=%s matched_tags=%s result_tags=%s result_ips=%s",
             result.resolver_name,
             ctx.query.qname.to_text(),
-            ctx.query.qtype,
-            sorted(rule.match_tags),
+            rrset.rdtype,
+            list(rewrite_result.matched_tags),
             sorted(answer.tags),
-            rewritten_ips,
+            list(rewrite_result.ips),
         )
         return result
 
 
-def _select_ip_rule_inputs(
-    *,
-    answer: Answer,
+def _match_rule_sections(
+    answer_tags: set[str],
     qtype: dns.rdatatype.RdataType,
-    rule: _IPRule,
-) -> tuple[_FamilyRule | None, list[str]]:
-    """先按结果标签选规则，再按查询类型提取当前可改写的源 IP 列表。"""
-    section = rule.sections.get(qtype)
-    if section is None:
-        return None, []
-
-    rrset = answer.rrset
-    if rrset is None or rrset.rdtype != qtype:
-        return None, []
-
-    source_ips = [rdata.to_text() for rdata in rrset]
-    return section, source_ips
+    rules: Sequence[_IPRule],
+) -> tuple[_FamilyRule, ...]:
+    """先筛出当前结果上真正可能命中的规则，后续再按 rrset 逐条尝试。"""
+    matched: list[_FamilyRule] = []
+    for rule in rules:
+        if not (answer_tags & rule.match_tags):
+            continue
+        section = rule.sections.get(qtype)
+        if section is None:
+            continue
+        matched.append(section)
+    return tuple(matched)
 
 
 def _normalize_ip_rules(
@@ -337,45 +346,70 @@ def _qtype_for_ip_text(
     return dns.rdatatype.A if parsed.version == 4 else dns.rdatatype.AAAA
 
 
-def _select_ip_rule(
-    answer_tags: set[str],
-    rules: Sequence[_IPRule],
-) -> _IPRule | None:
-    # 第一层匹配看的是结果标签，例如 tagset/domain_rule 写入的逻辑标签。
-    for rule in rules:
-        if answer_tags & rule.match_tags:
-            return rule
+def _rewrite_rrset(
+    rrset: dns.rrset.RRset,
+    matched_sections: Sequence[_FamilyRule],
+) -> _RewriteResult:
+    # 新 rrset 只收集命中的结果；同一个 replacement.tag 只保留首个命中的条目。
+    source_ips = tuple(rdata.to_text() for rdata in rrset)
+    rewritten: list[str] = []
+    matched_tags: list[str] = []
+    seen_tags: set[str] = set()
+
+    for source_ip in source_ips:
+        matched = _rewrite_one_ip(source_ip, matched_sections, seen_tags)
+        if matched is None:
+            continue
+        seen_tags.add(matched.tag)
+        matched_tags.append(matched.tag)
+        rewritten.append(matched.ip)
+
+    if not matched_tags:
+        return _RewriteResult(
+            ips=source_ips,
+            changed=False,
+            matched_tags=(),
+        )
+
+    rewritten_ips = tuple(rewritten)
+    return _RewriteResult(
+        ips=rewritten_ips,
+        changed=rewritten_ips != source_ips,
+        matched_tags=tuple(matched_tags),
+    )
+
+
+def _rewrite_one_ip(
+    source_ip: str,
+    matched_sections: Sequence[_FamilyRule],
+    seen_tags: set[str],
+) -> _MatchedReplacement | None:
+    # 对 rrset 的每条记录独立判断：先命中的 replacement tag 会占用该 tag。
+    source_tags = ipset.match_tags(source_ip)
+    for section in matched_sections:
+        replacement = _select_replacement(source_tags, section.replacements)
+        if replacement is None:
+            continue
+        if replacement.tag in seen_tags:
+            return None
+        return _MatchedReplacement(
+            tag=replacement.tag,
+            ip=_apply_replacement(source_ip, replacement),
+        )
     return None
 
 
-def _rewrite_ips(
-    source_ips: Sequence[str],
-    section: _FamilyRule,
-) -> list[str]:
-    rewritten: list[str] = []
-    seen: set[str] = set()
-    changed = False
-    for source_ip in source_ips:
-        final_ip = source_ip
-        # 第二层匹配看的是单个返回 IP 命中的 ipset tag，用于区分不同 CDN 地址段。
-        replacement = _select_replacement(
-            ipset.match_tags(source_ip),
-            section.replacements,
-        )
-        if replacement is not None:
-            changed = True
-            final_ip = replacement.ip
-            if replacement.preserve_prefix_len is not None:
-                final_ip = _rewrite_ip_prefix(
-                    replacement.ip,
-                    source_ip,
-                    replacement.preserve_prefix_len,
-                )
-        if final_ip in seen:
-            continue
-        seen.add(final_ip)
-        rewritten.append(final_ip)
-    return rewritten if changed else list(source_ips)
+def _apply_replacement(
+    source_ip: str,
+    replacement: _ReplacementRule,
+) -> str:
+    if replacement.preserve_prefix_len is None:
+        return replacement.ip
+    return _rewrite_ip_prefix(
+        replacement.ip,
+        source_ip,
+        replacement.preserve_prefix_len,
+    )
 
 
 def _select_replacement(

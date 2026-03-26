@@ -45,9 +45,11 @@ domain_rules:
 # plugins.ip_rule.IPRuleResolverHook 的规则配置。
 # 仅在 hooks.resolver 中显式声明该插件时生效。
 # 执行流程：
-# 1. 先用 answer.tags 与 rules[*].match_tags 匹配第一条命中的规则
-# 2. 再对上游返回的每个 A/AAAA 源 IP，按 replacement.tag 匹配 ipset tag
-# 3. 命中后替换为 replacement.ip；未命中的源 IP 保持原样；最终按顺序去重
+# 1. 先检查当前结果是否应处理：必须是 A/AAAA rrset，且不能命中 skip_result_tags
+# 2. 再遍历 rrset 中的每条记录，对当前记录按 rules 顺序逐条尝试
+# 3. 对命中的 rule，再按 replacement.tag 匹配该源 IP 命中的 ipset tag
+# 4. 命中后把结果写入新的 rrset；同一个 replacement.tag 只保留首个命中的结果
+# 5. 如果整组记录都没有命中，则保持原 rrset；否则用新的 rrset 回写 answer
 # replacement 字段说明：
 #   tag: 该源 IP 需要命中的 ipset tag
 #   ip: 替换使用的目标 IP / 前缀

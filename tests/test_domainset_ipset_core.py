@@ -356,7 +356,7 @@ class TestIPRuleResolverHook(unittest.IsolatedAsyncioTestCase):
             files[tag] = [filename]
         init_ipset(files, base_dir=base)
 
-    async def test_ip_rule_should_match_source_ip_tags_and_keep_unmatched_ip(self) -> None:
+    async def test_ip_rule_should_only_keep_matched_records_when_rewrite_happens(self) -> None:
         with tempfile.TemporaryDirectory(prefix="mydns-ip-rule-tags-") as td:
             base = Path(td)
             self._init_ipset_for_test(
@@ -390,9 +390,46 @@ class TestIPRuleResolverHook(unittest.IsolatedAsyncioTestCase):
         assert rewritten.answer is not None
         self.assertEqual(
             [rdata.to_text() for rdata in rewritten.answer.rrset],
-            ["203.0.113.10", "8.8.8.8"],
+            ["203.0.113.10"],
         )
         self.assertEqual(rewritten.answer.rrset.ttl, 60)
+
+    async def test_ip_rule_should_keep_original_rrset_when_nothing_matches(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mydns-ip-rule-no-match-") as td:
+            base = Path(td)
+            self._init_ipset_for_test(
+                base,
+                {
+                    "office": "1.1.1.0/24\n",
+                },
+            )
+
+            hook = IPRuleResolverHook(
+                rules=[
+                    {
+                        "match_tags": ["cn"],
+                        "A": {
+                            "replacements": [
+                                {
+                                    "tag": "telegram",
+                                    "ip": "203.0.113.10",
+                                }
+                            ],
+                        },
+                    }
+                ]
+            )
+            ctx = self._new_ctx(dns.rdatatype.A)
+            result = self._make_result(ctx, "1.1.1.1", "8.8.8.8", tags={"cn"})
+
+            rewritten = await hook.on_resolver_result(ctx, result)
+
+        assert rewritten is not None
+        assert rewritten.answer is not None
+        self.assertEqual(
+            [rdata.to_text() for rdata in rewritten.answer.rrset],
+            ["1.1.1.1", "8.8.8.8"],
+        )
 
     async def test_ip_rule_should_skip_when_result_has_skip_tag(self) -> None:
         hook = IPRuleResolverHook(
@@ -471,6 +508,54 @@ class TestIPRuleResolverHook(unittest.IsolatedAsyncioTestCase):
             ["203.0.113.10"],
         )
 
+    async def test_ip_rule_should_try_later_rule_when_current_record_does_not_match(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mydns-ip-rule-fallback-") as td:
+            base = Path(td)
+            self._init_ipset_for_test(
+                base,
+                {
+                    "cn": "5.6.7.0/24\n",
+                },
+            )
+
+            hook = IPRuleResolverHook(
+                rules=[
+                    {
+                        "match_tags": ["cn"],
+                        "A": {
+                            "replacements": [
+                                {
+                                    "tag": "office",
+                                    "ip": "203.0.113.10",
+                                }
+                            ],
+                        },
+                    },
+                    {
+                        "match_tags": ["cn"],
+                        "A": {
+                            "replacements": [
+                                {
+                                    "tag": "cn",
+                                    "ip": "203.0.113.20",
+                                }
+                            ],
+                        },
+                    },
+                ]
+            )
+            ctx = self._new_ctx(dns.rdatatype.A)
+            result = self._make_result(ctx, "5.6.7.8", tags={"cn"})
+
+            rewritten = await hook.on_resolver_result(ctx, result)
+
+        assert rewritten is not None
+        assert rewritten.answer is not None
+        self.assertEqual(
+            [rdata.to_text() for rdata in rewritten.answer.rrset],
+            ["203.0.113.20"],
+        )
+
     async def test_ip_rule_should_rewrite_each_source_ip_by_its_own_tag(self) -> None:
         with tempfile.TemporaryDirectory(prefix="mydns-ip-rule-per-ip-") as td:
             base = Path(td)
@@ -515,8 +600,8 @@ class TestIPRuleResolverHook(unittest.IsolatedAsyncioTestCase):
             ["203.0.113.4", "198.18.0.8"],
         )
 
-    async def test_ip_rule_should_dedupe_rewritten_ips(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="mydns-ip-rule-dedupe-") as td:
+    async def test_ip_rule_should_skip_records_with_duplicated_matched_tag(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mydns-ip-rule-duplicate-tag-") as td:
             base = Path(td)
             self._init_ipset_for_test(
                 base,
@@ -542,7 +627,7 @@ class TestIPRuleResolverHook(unittest.IsolatedAsyncioTestCase):
                 ]
             )
             ctx = self._new_ctx(dns.rdatatype.A)
-            result = self._make_result(ctx, "1.2.3.4", "5.6.7.4", tags={"cn"})
+            result = self._make_result(ctx, "1.2.3.4", "5.6.7.8", tags={"cn"})
 
             rewritten = await hook.on_resolver_result(ctx, result)
 
