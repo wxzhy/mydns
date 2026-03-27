@@ -1,0 +1,563 @@
+plan_id: plan-20260327-refactor-mydns
+objective: 全项目重构与性能优化（功能不变）
+focus_area: tests/* 与 README/AGENTS 测试约定
+created_at: "2026-03-27T00:00:00+08:00"
+created_by: gem-researcher
+status: completed
+
+tldr: |
+  - 测试体系采用“step1~step5 分层主链 + 插件/配置/协议专项 + 运行时平台专项（winloop/tricks）”的结构，覆盖从核心抽象到 UDP/TCP 端到端。
+  - 对“去冗余+提性能”最关键的回归锚点集中在 `test_cache_hooks.py`、`test_resolver_manager_step3.py`、`test_speedcheck_utils.py`、`test_speedcheck_hooks.py`、`test_selector_step4.py`、`test_config.py`。
+  - README 与 AGENTS 对测试命令与分层策略一致：推荐 `uv run python -m unittest discover -s tests -v`，并强调先补对应阶段测试再改实现。
+  - 现有测试已验证多项并发与超时语义（并行收集、hook 超时隔离、pending 合并请求、测速并行），但缺少统一性能基线型门禁（固定预算/基准报表）。
+  - 文档级约定要求：涉及流水线策略、配置字段、启动行为、测试命令变更时同步更新 README。
+
+research_metadata:
+  methodology: "两轮混合检索：semantic_search（两次，均无返回）+ grep_search 精确匹配 + 全量 read_file 分段阅读（tests 全文件、README、AGENTS）+ 依赖关系通过测试 import 与断言位置归纳。"
+  scope: "覆盖 tests 17 个文件 + README.md + AGENTS.md 的测试约定段落；聚焦分层覆盖、性能敏感回归、门禁与执行顺序。"
+  confidence: high
+  coverage: 100
+
+files_analyzed:
+  - file: test_core_step1.py
+    path: tests/test_core_step1.py
+    purpose: Step1 核心抽象与 wire 入参校验
+    key_elements:
+      - element: test_parse_query_context_should_refuse_non_query_opcode
+        type: function
+        location: tests/test_core_step1.py:68
+        description: 校验非 QUERY opcode 被拒绝
+      - element: test_parse_query_context_should_refuse_non_in_qclass
+        type: function
+        location: tests/test_core_step1.py:75
+        description: 校验非 IN qclass 被拒绝
+    language: python
+    lines: 134
+
+  - file: test_pipeline_step2.py
+    path: tests/test_pipeline_step2.py
+    purpose: Step2 流水线编排顺序与短路语义
+    key_elements:
+      - element: test_pipeline_order
+        type: function
+        location: tests/test_pipeline_step2.py:74
+        description: 验证 request -> upstream -> response 顺序
+      - element: test_request_short_circuit
+        type: function
+        location: tests/test_pipeline_step2.py:86
+        description: request 阶段 stop 后上游不再执行
+    language: python
+    lines: 137
+
+  - file: test_resolver_manager_step3.py
+    path: tests/test_resolver_manager_step3.py
+    purpose: Step3 并发上游收集、超时、hook 隔离
+    key_elements:
+      - element: test_concurrent_collect
+        type: function
+        location: tests/test_resolver_manager_step3.py:144
+        description: 验证并发收集耗时上界
+      - element: test_non_a_returns_first_normal
+        type: function
+        location: tests/test_resolver_manager_step3.py:314
+        description: 非 A/AAAA 采用 first_success 早停
+      - element: test_a_waits_all_resolver_and_hook
+        type: function
+        location: tests/test_resolver_manager_step3.py:335
+        description: A 查询 wait_all 等待所有 resolver
+      - element: test_hook_timeout_should_not_block_request
+        type: function
+        location: tests/test_resolver_manager_step3.py:389
+        description: hook 超时不阻塞主请求
+    language: python
+    lines: 413
+
+  - file: test_selector_step4.py
+    path: tests/test_selector_step4.py
+    purpose: Step4 结果选择与 CNAME 链保留
+    key_elements:
+      - element: test_a_fastest_normal_with_cname_chain
+        type: function
+        location: tests/test_selector_step4.py:66
+        description: A 记录按最快 RTT 选并去重，保留 CNAME 链
+      - element: test_non_a_type_fastest_response_passthrough
+        type: function
+        location: tests/test_selector_step4.py:99
+        description: 非 A/AAAA 选最快正常响应
+    language: python
+    lines: 124
+
+  - file: test_tcp_integration_step5.py
+    path: tests/test_tcp_integration_step5.py
+    purpose: Step5 TCP 端到端与协议拒绝路径
+    key_elements:
+      - element: test_tcp_query_round_trip
+        type: function
+        location: tests/test_tcp_integration_step5.py:49
+        description: TCP round-trip 与响应 flags 验证
+      - element: test_tcp_non_in_query_should_return_refused
+        type: function
+        location: tests/test_tcp_integration_step5.py:78
+        description: 非 IN qclass 返回 REFUSED
+    language: python
+    lines: 134
+
+  - file: test_udp_integration_step5.py
+    path: tests/test_udp_integration_step5.py
+    purpose: Step5 UDP 端到端与协议拒绝路径
+    key_elements:
+      - element: test_udp_query_round_trip
+        type: function
+        location: tests/test_udp_integration_step5.py:49
+        description: UDP round-trip 与响应 flags 验证
+      - element: test_udp_non_query_opcode_should_return_refused
+        type: function
+        location: tests/test_udp_integration_step5.py:102
+        description: 非 QUERY opcode 返回 REFUSED
+    language: python
+    lines: 131
+
+  - file: test_config.py
+    path: tests/test_config.py
+    purpose: 运行时配置装配与 hook 顺序语义校验
+    key_elements:
+      - element: test_tagset_hook_after_speedcheck_should_raise
+        type: function
+        location: tests/test_config.py:210
+        description: 校验 TagSet 不可晚于 SpeedCheck
+      - element: test_domain_rule_hook_should_load_after_cache_when_declared_manually
+        type: function
+        location: tests/test_config.py:357
+        description: 校验 DomainRule 在 Cache 之后
+      - element: test_ip_rule_hook_before_tagset_should_raise
+        type: function
+        location: tests/test_config.py:559
+        description: 校验 IPRule 不可早于 TagSet
+    language: python
+    lines: 665
+
+  - file: test_cache_hooks.py
+    path: tests/test_cache_hooks.py
+    purpose: 缓存命中、TTL 重写、pending 合并请求
+    key_elements:
+      - element: test_same_pending_request_should_wait_and_share_result
+        type: function
+        location: tests/test_cache_hooks.py:144
+        description: 同 key 并发请求仅一次上游查询
+      - element: test_same_pending_nxdomain_should_only_query_upstream_once
+        type: function
+        location: tests/test_cache_hooks.py:175
+        description: NXDOMAIN 场景同样验证 pending 合并
+    language: python
+    lines: 199
+
+  - file: test_speedcheck_utils.py
+    path: tests/test_speedcheck_utils.py
+    purpose: 探测工具并行性与缓存机制
+    key_elements:
+      - element: test_probe_one_ip_returns_fastest_method
+        type: function
+        location: tests/test_speedcheck_utils.py:13
+        description: 单 IP 多方法竞速取最优
+      - element: test_probe_ips_runs_in_parallel
+        type: function
+        location: tests/test_speedcheck_utils.py:120
+        description: 多 IP 并行探测耗时上界
+    language: python
+    lines: 147
+
+  - file: test_speedcheck_hooks.py
+    path: tests/test_speedcheck_hooks.py
+    purpose: SpeedCheckResolverHook 与 RewriteAnswerByRTTHook 行为
+    key_elements:
+      - element: test_response_hook_rewrite_by_rtt
+        type: function
+        location: tests/test_speedcheck_hooks.py:78
+        description: 根据 RTT 改写最终 A 记录
+      - element: test_probe_timeout_should_not_break_request
+        type: function
+        location: tests/test_speedcheck_hooks.py:213
+        description: 探测超时时请求仍可继续
+    language: python
+    lines: 238
+
+  - file: test_domainset_ipset_core.py
+    path: tests/test_domainset_ipset_core.py
+    purpose: domainset/ipset 基础结构与 domain/ip 规则插件行为
+    key_elements:
+      - element: test_domain_rule_should_intercept_a_query
+        type: function
+        location: tests/test_domainset_ipset_core.py:137
+        description: 域名规则拦截 A 并返回固定地址
+      - element: test_ip_rule_should_rewrite_each_source_ip_by_its_own_tag
+        type: function
+        location: tests/test_domainset_ipset_core.py:559
+        description: 多源 IP 按 tag 独立改写
+      - element: test_ip_rule_should_run_before_speedcheck
+        type: function
+        location: tests/test_domainset_ipset_core.py:734
+        description: 验证 IPRule 在 SpeedCheck 前生效
+    language: python
+    lines: 782
+
+  - file: test_tagset_and_sets.py
+    path: tests/test_tagset_and_sets.py
+    purpose: TagSet 标签传播、广告流量短路与 selector 协同
+    key_elements:
+      - element: test_cname_tag_should_add_tags_and_block_a_answer
+        type: function
+        location: tests/test_tagset_and_sets.py:52
+        description: CNAME 命中标签后改写阻断地址
+      - element: test_speedcheck_should_skip_ads_tagged_result
+        type: function
+        location: tests/test_tagset_and_sets.py:128
+        description: ads 标签结果跳过测速
+    language: python
+    lines: 179
+
+  - file: test_https_record_hook.py
+    path: tests/test_https_record_hook.py
+    purpose: HTTPS RR 清洗（alpn/hint）与 ECH 注入/缓存
+    key_elements:
+      - element: test_should_inject_ech_when_subquery_result_matches_cloudflare
+        type: function
+        location: tests/test_https_record_hook.py:263
+        description: 子查询标签驱动 ECH 注入
+      - element: test_should_cache_ech_fetch_for_same_pipeline
+        type: function
+        location: tests/test_https_record_hook.py:311
+        description: 同 pipeline 复用 ECH 获取缓存
+    language: python
+    lines: 345
+
+  - file: test_resolvers_multi_and_tricks.py
+    path: tests/test_resolvers_multi_and_tricks.py
+    purpose: UDP/TCP/TLS/HTTPS/QUIC resolver 参数透传与 tricks socket
+    key_elements:
+      - element: test_udp_resolver_should_override_or_add_ecs_option
+        type: function
+        location: tests/test_resolvers_multi_and_tricks.py:147
+        description: ECS 覆盖/注入行为验证
+      - element: test_https_resolver_should_reuse_shared_client
+        type: function
+        location: tests/test_resolvers_multi_and_tricks.py:274
+        description: DoH 共享客户端复用
+    language: python
+    lines: 322
+
+  - file: test_trick_sockets_runtime.py
+    path: tests/test_trick_sockets_runtime.py
+    purpose: 默认事件循环下 trick sockets 运行时行为
+    key_elements:
+      - element: test_udp_trick_should_not_depend_on_loop_sock_methods
+        type: function
+        location: tests/test_trick_sockets_runtime.py:46
+        description: 验证不依赖 loop.sock_* 方法
+    language: python
+    lines: 82
+
+  - file: test_trick_sockets_winloop.py
+    path: tests/test_trick_sockets_winloop.py
+    purpose: Windows winloop 事件循环兼容回归
+    key_elements:
+      - element: test_tcp_trick_should_work_under_winloop
+        type: function
+        location: tests/test_trick_sockets_winloop.py:15
+        description: winloop 下 TCP trick 回归
+    language: python
+    lines: 69
+
+  - file: test_answer_model.py
+    path: tests/test_answer_model.py
+    purpose: Answer 封装对象同步与复制语义
+    key_elements:
+      - element: test_replace_rrset_should_sync_response_and_to_message
+        type: function
+        location: tests/test_answer_model.py:46
+        description: 改写 rrset 后 response/message 同步
+    language: python
+    lines: 108
+
+  - file: README.md
+    path: README.md
+    purpose: 面向开发者的测试命令与测试范围说明
+    key_elements:
+      - element: 测试命令
+        type: pattern
+        location: README.md:133
+        description: 定义全量与单文件测试执行方式
+      - element: tests 目录分层说明
+        type: pattern
+        location: README.md:79
+        description: 声明 step1~step5 分阶段测试组织
+    language: markdown
+    lines: 155
+
+  - file: AGENTS.md
+    path: AGENTS.md
+    purpose: 代理协作约定中的测试策略与同步要求
+    key_elements:
+      - element: 开发与测试约定
+        type: pattern
+        location: AGENTS.md:76
+        description: 明确全量测试命令与 step 分层优先策略
+      - element: 文档同步要求
+        type: pattern
+        location: AGENTS.md:87
+        description: 涉及测试命令变更时需同步 README
+    language: markdown
+    lines: 100
+
+patterns_found:
+  - category: structure
+    pattern: 分层主链测试（step1~step5）
+    description: 从核心抽象到端到端按阶段递进，便于重构时局部回归与分层定位
+    examples:
+      - file: tests/test_core_step1.py
+        location: tests/test_core_step1.py:1
+        snippet: '"""Step 1: 核心抽象与接口骨架测试。"""'
+      - file: tests/test_pipeline_step2.py
+        location: tests/test_pipeline_step2.py:1
+        snippet: '"""Step 2: 三阶段流水线编排测试。"""'
+      - file: tests/test_resolver_manager_step3.py
+        location: tests/test_resolver_manager_step3.py:1
+        snippet: '"""Step 3: ResolverManager 并发与 resolver hook 测试。"""'
+    prevalence: common
+
+  - category: architecture
+    pattern: 配置语义约束通过测试显式守护
+    description: hook 顺序、手动声明要求、非法配置均有负向测试
+    examples:
+      - file: tests/test_config.py
+        location: tests/test_config.py:210
+        snippet: 'def test_tagset_hook_after_speedcheck_should_raise(self) -> None:'
+      - file: tests/test_config.py
+        location: tests/test_config.py:481
+        snippet: 'def test_ip_rule_hook_after_speedcheck_should_raise(self) -> None:'
+    prevalence: common
+
+  - category: performance
+    pattern: 使用耗时上界断言并发/超时行为
+    description: 多处通过 `time.perf_counter()` + `assertLess/Greater` 验证并发收益与超时隔离
+    examples:
+      - file: tests/test_resolver_manager_step3.py
+        location: tests/test_resolver_manager_step3.py:144
+        snippet: 'self.assertLess(duration, 0.2)'
+      - file: tests/test_speedcheck_utils.py
+        location: tests/test_speedcheck_utils.py:120
+        snippet: 'self.assertLess(duration, 0.22)'
+    prevalence: occasional
+
+  - category: error_handling
+    pattern: 协议非法输入与 hook 异常容错
+    description: 非 QUERY/IN 请求返回 REFUSED；hook 抛错/超时不应击穿主链
+    examples:
+      - file: tests/test_core_step1.py
+        location: tests/test_core_step1.py:68
+        snippet: 'with self.assertRaises(RefusedRequestError):'
+      - file: tests/test_resolver_manager_step3.py
+        location: tests/test_resolver_manager_step3.py:371
+        snippet: 'def test_hook_exception_should_not_break_request(self) -> None:'
+    prevalence: common
+
+  - category: testing
+    pattern: 去冗余与性能关注点集中在缓存/并发/改写链
+    description: pending 合并、RTT 改写、IP 规则改写、selector 去重共同构成重构高风险闭环
+    examples:
+      - file: tests/test_cache_hooks.py
+        location: tests/test_cache_hooks.py:144
+        snippet: 'test_same_pending_request_should_wait_and_share_result'
+      - file: tests/test_selector_step4.py
+        location: tests/test_selector_step4.py:66
+        snippet: 'test_a_fastest_normal_with_cname_chain'
+    prevalence: common
+
+related_architecture:
+  components_relevant_to_domain:
+    - component: Pipeline
+      responsibility: 执行 request/upstream/response 三阶段
+      location: core/pipeline.py
+      relationship_to_domain: tests 直接验证顺序、短路与回退语义
+    - component: ResolverManager
+      responsibility: 上游并发收集、first_success/wait_all、resolver hook 调度
+      location: upstream/resolver_manager.py
+      relationship_to_domain: Step3 与性能断言核心对象
+    - component: Selector
+      responsibility: 候选答案聚合、A/AAAA 去重与 CNAME 保留
+      location: upstream/selector.py
+      relationship_to_domain: Step4 选择逻辑核心
+    - component: Plugin hooks
+      responsibility: 缓存、规则、测速、HTTPS 记录处理
+      location: plugins/
+      relationship_to_domain: 专项测试集中覆盖
+  interfaces_used_by_domain:
+    - interface: unittest.IsolatedAsyncioTestCase
+      location: tests/*.py
+      usage_pattern: 异步 hook/resolver/server 场景回归
+    - interface: dns.asyncquery.*
+      location: tests/test_resolvers_multi_and_tricks.py
+      usage_pattern: monkeypatch 验证协议参数与调用路径
+  data_flow_involving_domain: "测试按查询生命周期组织：wire 校验 -> pipeline 编排 -> resolver_manager 收集 -> selector 选择 -> UDP/TCP 回包，并在插件阶段插入规则/缓存/测速/HTTPS 处理断言。"
+  key_relationships_to_domain:
+    - from: tests/test_pipeline_step2.py
+      to: core/pipeline.py
+      relationship: calls
+    - from: tests/test_resolver_manager_step3.py
+      to: upstream/resolver_manager.py
+      relationship: calls
+    - from: tests/test_selector_step4.py
+      to: upstream/selector.py
+      relationship: calls
+    - from: tests/test_config.py
+      to: config.py
+      relationship: calls
+
+related_technology_stack:
+  languages_used_in_domain:
+    - Python
+    - Markdown
+  frameworks_used_in_domain:
+    - name: unittest
+      usage_in_domain: 单元测试与异步测试主框架
+  libraries_used_in_domain:
+    - name: dnspython
+      purpose_in_domain: 构造/解析 DNS message 与协议调用桩
+    - name: async-lru
+      purpose_in_domain: ECH 与测速缓存相关行为测试
+    - name: winloop
+      purpose_in_domain: Windows 事件循环兼容性回归
+  external_apis_used_in_domain:
+    - name: dns.asyncquery (udp/tcp/tls/https/quic)
+      integration_point: tests/test_resolvers_multi_and_tricks.py
+
+related_conventions:
+  naming_patterns_in_domain: "测试文件采用 `test_<topic>[_stepN].py`；用例名以 `test_should_...` 或 `test_<behavior>` 命名。"
+  structure_of_domain: "主链 step1~step5 + 专项文件（config/cache/domain-ip/tagset/speedcheck/https_record/resolvers/tricks）。"
+  error_handling_in_domain: "通过异常断言与 rcode 断言覆盖非法输入、超时、hook 异常。"
+  testing_in_domain: "大量使用 fake resolver/fake pipeline/monkeypatch；异步用例使用 IsolatedAsyncioTestCase。"
+  documentation_in_domain: "README 与 AGENTS 均定义测试命令与分层策略，且 AGENTS 要求变更测试命令同步 README。"
+
+related_dependencies:
+  internal:
+    - component: core/pipeline.py
+      relationship_to_domain: 被 step2/step5 与 cache 测试直接调用
+      direction: outbound
+    - component: upstream/resolver_manager.py
+      relationship_to_domain: 被 step3 测试直接调用
+      direction: outbound
+    - component: upstream/selector.py
+      relationship_to_domain: 被 step4 与 ads 流测试直接调用
+      direction: outbound
+    - component: config.py
+      relationship_to_domain: 被配置测试直接调用
+      direction: outbound
+    - component: plugins/*
+      relationship_to_domain: 被专项测试直接调用
+      direction: outbound
+  external:
+    - name: dnspython
+      purpose_for_domain: DNS 协议对象与 asyncquery 调用
+    - name: async-lru
+      purpose_for_domain: 缓存行为与警告类型
+    - name: winloop
+      purpose_for_domain: Windows loop 回归
+
+domain_security_considerations:
+  sensitive_areas:
+    - area: DNS 请求合法性过滤
+      location: tests/test_core_step1.py:68,75 与 tests/test_tcp_integration_step5.py:78,105
+      concern: 非 QUERY opcode / 非 IN qclass 必须拒绝，避免非预期请求进入主流程
+  authentication_patterns_in_domain: "该域未涉及认证流程。"
+  authorization_patterns_in_domain: "该域未涉及授权流程。"
+  data_validation_in_domain: "协议级输入校验、配置参数合法性校验（resolver/hook/顺序/IP tag）覆盖较完整。"
+
+testing_patterns:
+  framework: unittest
+  coverage_areas:
+    - 协议输入校验与错误响应 flags
+    - 流水线顺序、短路与 SERVFAIL 回退
+    - 并发收集策略（wait_all / first_success）
+    - 缓存 pending 合并与 TTL 重写
+    - RTT 探测并行与响应改写
+    - 配置语义约束（hook 顺序与必填关系）
+    - UDP/TCP 端到端与 winloop 兼容
+  test_organization: "step 主链 + 插件专项 + 平台专项"
+  mock_patterns:
+    - monkeypatch dns.asyncquery.*
+    - fake resolver / fake pipeline / fake probe
+    - 临时目录写入规则文件验证 domainset/ipset
+
+focus_conclusions:
+  current_test_layering_and_coverage:
+    - "Step1（core/wire）: 核心模型默认值、请求合法性、错误回包 flags。"
+    - "Step2（pipeline）: 三阶段顺序、request 短路、空候选 SERVFAIL。"
+    - "Step3（resolver_manager）: 并发、标签过滤、resolver 覆盖超时、hook 异常/超时隔离、A wait_all 与非 A first_success。"
+    - "Step4（selector）: A/AAAA 选最快、IP 去重、CNAME 链保留、非 A 快速透传。"
+    - "Step5（udp/tcp）: 端到端 round-trip、非 IN/非 QUERY 拒绝。"
+    - "专项（config/cache/domain/ip/tagset/speedcheck/https_record/resolvers/tricks）覆盖配置语义、规则改写、测速与平台兼容。"
+
+  critical_regression_suite_for_dedup_and_performance:
+    P0:
+      - test_cache_hooks.py::test_same_pending_request_should_wait_and_share_result
+      - test_cache_hooks.py::test_same_pending_nxdomain_should_only_query_upstream_once
+      - test_resolver_manager_step3.py::test_concurrent_collect
+      - test_resolver_manager_step3.py::test_non_a_returns_first_normal
+      - test_resolver_manager_step3.py::test_a_waits_all_resolver_and_hook
+      - test_speedcheck_utils.py::test_probe_ips_runs_in_parallel
+      - test_speedcheck_hooks.py::test_probe_timeout_should_not_break_request
+      - test_selector_step4.py::test_a_fastest_normal_with_cname_chain
+      - test_config.py::test_tagset_hook_after_speedcheck_should_raise
+      - test_config.py::test_ip_rule_hook_before_tagset_should_raise
+    P1:
+      - test_domainset_ipset_core.py::test_ip_rule_should_run_before_speedcheck
+      - test_domainset_ipset_core.py::test_ip_rule_should_rewrite_each_source_ip_by_its_own_tag
+      - test_https_record_hook.py::test_should_cache_ech_fetch_for_same_pipeline
+      - test_resolvers_multi_and_tricks.py::test_https_resolver_should_reuse_shared_client
+    P2:
+      - test_tcp_integration_step5.py::test_tcp_query_round_trip
+      - test_udp_integration_step5.py::test_udp_query_round_trip
+      - test_trick_sockets_winloop.py::*
+
+  potential_missing_edge_scenarios:
+    - "未见对同一 pending owner 被取消/异常中断后的等待者恢复路径测试（仅覆盖成功与 NXDOMAIN 合并）。"
+    - "未见统一‘性能基线’测试（例如固定 resolver 数量下的预算阈值/基准产物），当前为若干局部耗时断言。"
+    - "未见 HTTPS 记录处理与完整 UDP/TCP 端到端联动测试（目前 HTTPS 记录主要为 hook 单测）。"
+    - "未见高并发扇出（>2 resolvers）下 wait_all/first_success 的压力边界测试。"
+
+  recommended_execution_order_smoke_to_full:
+    - stage: 快速烟测（核心语义）
+      command: uv run python -m unittest -v tests/test_core_step1.py tests/test_pipeline_step2.py tests/test_selector_step4.py tests/test_answer_model.py
+      basis: README/AGENTS 的 unittest/uv 约定与 step 分层策略
+    - stage: 性能敏感与去冗余主回归
+      command: uv run python -m unittest -v tests/test_cache_hooks.py tests/test_resolver_manager_step3.py tests/test_speedcheck_utils.py tests/test_speedcheck_hooks.py tests/test_config.py
+      basis: 并发/超时/顺序约束集中区
+    - stage: 协议与平台专项
+      command: uv run python -m unittest -v tests/test_resolvers_multi_and_tricks.py tests/test_trick_sockets_runtime.py tests/test_trick_sockets_winloop.py
+      basis: 多协议参数透传与 Windows loop 兼容
+    - stage: 端到端补齐
+      command: uv run python -m unittest -v tests/test_udp_integration_step5.py tests/test_tcp_integration_step5.py
+      basis: 网络服务真实回包路径
+    - stage: 全量回归
+      command: uv run python -m unittest discover -s tests -v
+      basis: README 与 AGENTS 一致推荐
+
+  validation_gate_suggestions_for_refactor:
+    - "Gate-1 语义门禁：Step1~Step4 + test_config（hook 顺序/配置合法性）必须全绿。"
+    - "Gate-2 性能门禁：包含耗时断言的测试（resolver_manager/speedcheck/cache）必须全绿且无超时放宽。"
+    - "Gate-3 协议门禁：UDP/TCP round-trip 与非法请求拒绝（REFUSED）必须全绿。"
+    - "Gate-4 平台门禁：Windows 环境必须执行 trick_sockets_winloop。"
+    - "Gate-5 文档一致性门禁：若测试命令或分层策略改变，需同步 README（AGENTS 第 8 节约束）。"
+
+open_questions:
+  - question: 当前仓库是否已有“官方 smoke 测试集合”命令（非临时拼接文件列表）？
+    context: README/AGENTS 仅给出全量 discover 与单文件示例，未定义标准化 smoke 套件。
+  - question: winloop 测试在非 Windows CI 是否被条件跳过或使用独立 job？
+    context: 焦点区域中存在 Windows 专项测试，但文档未声明跨平台执行策略细节。
+
+gaps:
+  - area: 语义检索结果
+    description: semantic_search 两次均返回空，关系发现主要依赖 grep + 全量阅读。
+    impact: 不影响本次 focus_area 事实提取，但降低了自动语义关联能力。
+  - area: 性能基准化门禁
+    description: 存在局部耗时断言，但未见统一基准脚本/报告与阈值治理文档。
+    impact: 重构后“性能不退化”判定仍偏分散，难形成单一指标审计。

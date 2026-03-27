@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import dns.name
 import dns.opcode
@@ -20,6 +20,7 @@ from core.context import QueryContext
 from core.hooks import ResponseHook
 from core.ipset import ipset
 from core.models import Query
+from core.response_guard import response_guard_reason
 from logger import get_logger
 from plugins._config import OptionalStrSet, PluginConfigModel
 
@@ -65,10 +66,11 @@ class HttpsRecordResponseHook(ResponseHook):
             return
 
         assert answer is not None
-        pipeline = ctx.state.get("pipeline")
-        if not _is_pipeline_like(pipeline):
+        pipeline_obj = ctx.state.get("pipeline")
+        if not _is_pipeline_like(pipeline_obj):
             _log_skip(ctx, reason="missing_pipeline", answer=answer)
             return
+        pipeline = cast("Pipeline", pipeline_obj)
 
         rrset = answer.rrset
         assert rrset is not None
@@ -102,6 +104,7 @@ class HttpsRecordResponseHook(ResponseHook):
         rewritten_rrset = dns.rrset.RRset(rrset.name, rrset.rdclass, rrset.rdtype)
         rewritten_rrset.ttl = rrset.ttl
 
+        subquery_result_cache: dict[str, bool] = {}
         changed = False
         for rdata in rrset:
             rewritten = await self._rewrite_rdata(
@@ -109,6 +112,7 @@ class HttpsRecordResponseHook(ResponseHook):
                 answer,
                 rrset.name,
                 rdata,
+                subquery_result_cache=subquery_result_cache,
             )
             rewritten_rrset.add(rewritten, rrset.ttl)
             if rewritten.to_text() != rdata.to_text():
@@ -121,6 +125,8 @@ class HttpsRecordResponseHook(ResponseHook):
         answer: Answer,
         owner_name: dns.name.Name,
         rdata: Any,
+        *,
+        subquery_result_cache: dict[str, bool],
     ) -> Any:
         original_params = dict(rdata.params)
         rewritten_params = dict(original_params)
@@ -142,6 +148,7 @@ class HttpsRecordResponseHook(ResponseHook):
                 owner_name,
                 original_ipv4hints,
                 original_ipv6hints,
+                subquery_result_cache=subquery_result_cache,
             )
             if should_inject:
                 ech_value = await _fetch_cached_ech_value(
@@ -173,6 +180,8 @@ class HttpsRecordResponseHook(ResponseHook):
         owner_name: dns.name.Name,
         ipv4hints: list[str],
         ipv6hints: list[str],
+        *,
+        subquery_result_cache: dict[str, bool],
     ) -> bool:
         if not self.cloudflare_tags:
             return False
@@ -180,11 +189,19 @@ class HttpsRecordResponseHook(ResponseHook):
             return True
         if _ips_match_tags([*ipv4hints, *ipv6hints], self.cloudflare_tags):
             return True
-        return await _subqueries_indicate_cloudflare(
+
+        owner_name_text = owner_name.to_text()
+        cached = subquery_result_cache.get(owner_name_text)
+        if cached is not None:
+            return cached
+
+        cloudflare_detected = await _subqueries_indicate_cloudflare(
             pipeline,
             owner_name,
             self.cloudflare_tags,
         )
+        subquery_result_cache[owner_name_text] = cloudflare_detected
+        return cloudflare_detected
 
 
 def normalize_https_record_hook_kwargs(raw_kwargs: Any) -> dict[str, Any]:
@@ -205,15 +222,9 @@ def _skip_reason(
     if ctx.query.qtype != dns.rdatatype.HTTPS:
         return "unsupported_qtype"
 
-    response = answer.response
-    if response.rcode() != dns.rcode.NOERROR:
-        return "rcode_not_noerror"
-    if response.opcode() != dns.opcode.QUERY:
-        return "invalid_opcode"
-    if not response.question:
-        return "missing_question"
-    if response.question[0].rdclass != dns.rdataclass.IN:
-        return "invalid_qclass"
+    reason = response_guard_reason(answer.response, noerror_reason="rcode_not_noerror")
+    if reason is not None:
+        return reason
     if answer.tags & skip_result_tags:
         return "skip_result_tags"
     if _is_ech_source_answer(answer):
@@ -319,7 +330,7 @@ async def _subqueries_indicate_cloudflare(
         return_exceptions=True,
     )
     for result in results:
-        if isinstance(result, Exception):
+        if isinstance(result, BaseException):
             continue
         if _answer_indicates_cloudflare(result, cloudflare_tags):
             return True

@@ -387,15 +387,19 @@ class RuntimeSemanticConfigModel(BaseModel):
         _validate_request_hook_order(self.request_hooks)
         _validate_resolver_hook_order(self.resolver_hooks)
 
+        request_hooks_by_class = _group_hooks_by_class_path(self.request_hooks)
+        resolver_hooks_by_class = _group_hooks_by_class_path(self.resolver_hooks)
+        response_hooks_by_class = _group_hooks_by_class_path(self.response_hooks)
+
         if self.domain_rules:
             _validate_domain_rule_tags(
                 self.domain_rules,
                 available_tags=self.domainset_tags,
                 key="domain_rules",
             )
-            domain_rule_hooks = _find_hooks(
-                self.request_hooks,
-                class_path=_DOMAIN_RULE_REQUEST_HOOK,
+            domain_rule_hooks = request_hooks_by_class.get(
+                _DOMAIN_RULE_REQUEST_HOOK,
+                [],
             )
             if not domain_rule_hooks:
                 raise ValueError(
@@ -414,7 +418,7 @@ class RuntimeSemanticConfigModel(BaseModel):
                     "不能同时配置"
                 )
 
-        for hook in _find_hooks(self.request_hooks, class_path=_DOMAIN_RULE_REQUEST_HOOK):
+        for hook in request_hooks_by_class.get(_DOMAIN_RULE_REQUEST_HOOK, []):
             manual_rules = _extract_domain_rule_hook_rules(hook)
             if manual_rules:
                 _validate_domain_rule_tags(
@@ -431,10 +435,7 @@ class RuntimeSemanticConfigModel(BaseModel):
                 key="ip_rules",
             )
             if self.ip_rules.get("rules"):
-                ip_rule_hooks = _find_hooks(
-                    self.resolver_hooks,
-                    class_path=_IP_RULE_RESOLVER_HOOK,
-                )
+                ip_rule_hooks = resolver_hooks_by_class.get(_IP_RULE_RESOLVER_HOOK, [])
                 if not ip_rule_hooks:
                     raise ValueError(
                         "配置了 ip_rules，但 hooks.resolver 中未声明 "
@@ -452,7 +453,7 @@ class RuntimeSemanticConfigModel(BaseModel):
                         "skip_result_tags 不能同时配置"
                     )
 
-        for hook in _find_hooks(self.resolver_hooks, class_path=_IP_RULE_RESOLVER_HOOK):
+        for hook in resolver_hooks_by_class.get(_IP_RULE_RESOLVER_HOOK, []):
             hook_ip_rules = normalize_ip_rule_hook_kwargs(hook.kwargs)
             if hook_ip_rules:
                 _validate_ip_rule_tags(
@@ -462,7 +463,7 @@ class RuntimeSemanticConfigModel(BaseModel):
                     key=_IP_RULE_RESOLVER_HOOK,
                 )
 
-        for hook in _find_hooks(self.response_hooks, class_path=_HTTPS_RECORD_RESPONSE_HOOK):
+        for hook in response_hooks_by_class.get(_HTTPS_RECORD_RESPONSE_HOOK, []):
             kwargs = normalize_https_record_hook_kwargs(hook.kwargs)
             _validate_tag_membership(
                 kwargs["skip_result_tags"],
@@ -646,6 +647,24 @@ def _find_hooks(specs: Sequence[HookSpecModel], *, class_path: str) -> list[Hook
     return [spec for spec in specs if spec.class_path == class_path]
 
 
+def _group_hooks_by_class_path(
+    specs: Sequence[HookSpecModel],
+) -> dict[str, list[HookSpecModel]]:
+    grouped: dict[str, list[HookSpecModel]] = {}
+    for spec in specs:
+        grouped.setdefault(spec.class_path, []).append(spec)
+    return grouped
+
+
+def _hook_indexes_by_class_path(
+    specs: Sequence[HookSpecModel],
+) -> dict[str, list[int]]:
+    grouped: dict[str, list[int]] = {}
+    for index, spec in enumerate(specs):
+        grouped.setdefault(spec.class_path, []).append(index)
+    return grouped
+
+
 def _extract_domain_rule_hook_rules(spec: HookSpecModel) -> dict[str, Any]:
     return normalize_domain_rule_hook_kwargs(spec.kwargs).get("rules", {})
 
@@ -656,32 +675,23 @@ def _hook_has_effective_ip_rules(spec: HookSpecModel) -> bool:
 
 
 def _validate_request_hook_order(hooks: Sequence[HookSpecModel]) -> None:
-    cache_indexes = [
-        index for index, hook in enumerate(hooks) if hook.class_path == _CACHE_HOOK
-    ]
+    hook_indexes = _hook_indexes_by_class_path(hooks)
+    cache_indexes = hook_indexes.get(_CACHE_HOOK, [])
     if not cache_indexes:
         return
-    last_cache = max(cache_indexes)
-    for index, hook in enumerate(hooks):
-        if hook.class_path == _DOMAIN_RULE_REQUEST_HOOK and index < last_cache:
-            raise ValueError(
-                "plugins.domain_rule.DomainRuleRequestHook 必须位于 "
-                "plugins.cache.CacheHook 之后"
-            )
+    domain_rule_indexes = hook_indexes.get(_DOMAIN_RULE_REQUEST_HOOK, [])
+    if domain_rule_indexes and min(domain_rule_indexes) < max(cache_indexes):
+        raise ValueError(
+            "plugins.domain_rule.DomainRuleRequestHook 必须位于 "
+            "plugins.cache.CacheHook 之后"
+        )
 
 
 def _validate_resolver_hook_order(hooks: Sequence[HookSpecModel]) -> None:
-    tagset_indexes = [
-        index for index, hook in enumerate(hooks) if hook.class_path == _TAGSET_RESOLVER_HOOK
-    ]
-    ip_rule_indexes = [
-        index for index, hook in enumerate(hooks) if hook.class_path == _IP_RULE_RESOLVER_HOOK
-    ]
-    speedcheck_indexes = [
-        index
-        for index, hook in enumerate(hooks)
-        if hook.class_path == _SPEEDCHECK_RESOLVER_HOOK
-    ]
+    hook_indexes = _hook_indexes_by_class_path(hooks)
+    tagset_indexes = hook_indexes.get(_TAGSET_RESOLVER_HOOK, [])
+    ip_rule_indexes = hook_indexes.get(_IP_RULE_RESOLVER_HOOK, [])
+    speedcheck_indexes = hook_indexes.get(_SPEEDCHECK_RESOLVER_HOOK, [])
     if tagset_indexes and ip_rule_indexes and min(tagset_indexes) > min(ip_rule_indexes):
         raise ValueError(
             "plugins.tagset.TagSetResolverHook 必须位于 "

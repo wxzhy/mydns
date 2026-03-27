@@ -47,7 +47,7 @@
 	- 等待所有匹配 resolver 结果
 	- 汇总测速结果后按 RTT 排序
 	- 默认返回最快 2 个 IP，并保留 CNAME 链
-- 其他类型：**first_success**
+- 其他类型（含 `HTTPS`）：**first_success**
 	- 收到首个正常结果即可提前结束
 - 若最终没有有效结果：回退 `SERVFAIL`
 
@@ -130,6 +130,12 @@ tests/     单元测试 + 分阶段集成测试（step1~step5）
 
 ## 测试
 
+- 推荐门禁流程（先烟测，后全量）：
+	1. 先运行最小烟测：
+		- `uv run python -m unittest -v tests.test_config tests.test_resolver_manager_step3 tests.test_https_record_hook tests.test_speedcheck_hooks tests.test_speedcheck_utils`
+	2. 烟测通过后再运行全量：
+		- `uv run python -m unittest discover -s tests -v`
+- 若烟测失败，先定位并修复失败模块，不直接进入全量回归。
 - 全量回归：`python -m unittest discover -s tests -v`
 - 使用 uv：`uv run python -m unittest discover -s tests -v`
 - 单文件示例：`uv run python -m unittest -v tests/test_selector_step4.py`

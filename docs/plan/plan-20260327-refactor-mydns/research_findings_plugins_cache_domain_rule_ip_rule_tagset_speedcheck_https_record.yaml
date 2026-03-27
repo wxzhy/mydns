@@ -1,0 +1,559 @@
+plan_id: plan-20260327-refactor-mydns
+objective: 全项目重构与性能优化（功能不变）
+focus_area: "plugins/*.py（cache/domain_rule/ip_rule/tagset/speedcheck/https_record）"
+created_at: "2026-03-27T00:00:00+08:00"
+created_by: gem-researcher
+status: completed
+
+tldr: |
+  - 6 个目标插件职责分层明确：`cache/domain_rule` 在 request，`tagset/ip_rule/speedcheck` 在 resolver，`https_record` 在 response；且顺序由 `config.py` 强约束。
+  - 发现 3 类可抽取重复：`_build_ip_rrset`（3 处）、hook kwargs 标准化函数（6 处同形）、响应前置合法性判断（`resolver_manager` 与 `https_record` 存在相似 guard）。
+  - 主要性能热点集中在 `https_record`：同一 HTTPS RRSet 多条 rdata 时，Cloudflare 判定子查询可能重复触发 A/AAAA 内部查询。
+  - 现有测试覆盖较充分，顺序/语义/异常路径均有验证；缺口主要在“多 rdata 场景下避免重复子查询”和“重构后公共函数一致性回归”。
+  - 低风险重构可按“提取纯函数 -> 合并 guard -> 局部性能缓存 -> 最后做微优化”顺序推进，且不改变 hook 执行顺序语义。
+
+research_metadata:
+  methodology: "三轮混合检索：semantic_search（2 次，索引返回空）+ grep_search（符号/模式/引用）+ read_file（插件/配置/核心/测试）+ 关系发现（import、调用链、顺序约束）+ 行数统计（PowerShell）"
+  scope: "深度覆盖 6 个目标插件与其直接依赖（config/pipeline/resolver_manager/selector/cache/answer）及关键测试文件"
+  confidence: high
+  coverage: 94
+
+files_analyzed:
+  - file: cache.py
+    path: plugins/cache.py
+    purpose: 请求阶段缓存命中短路、响应阶段写回缓存并处理同 key pending 合并。
+    key_elements:
+      - element: CacheHook
+        type: class
+        location: plugins/cache.py:59
+        description: 同时实现 RequestHook 与 ResponseHook，维护 `cache_hit/cache_wait` 状态。
+      - element: _handle_cache_miss
+        type: function
+        location: plugins/cache.py:102
+        description: owner 继续上游，non-owner 等待 future 共享结果，避免并发击穿。
+      - element: normalize_cache_hook_kwargs
+        type: function
+        location: plugins/cache.py:143
+        description: 配置归一化入口，供 `config.py` 调用。
+    language: python
+    lines: 145
+
+  - file: domain_rule.py
+    path: plugins/domain_rule.py
+    purpose: 根据 domainset 标签更新 `ctx.tags`，并执行 intercept/hosts 规则短路。
+    key_elements:
+      - element: DomainRuleRequestHook
+        type: class
+        location: plugins/domain_rule.py:91
+        description: request 阶段标签合并与规则命中主入口。
+      - element: _build_intercept_answer
+        type: function
+        location: plugins/domain_rule.py:214
+        description: A/AAAA 返回 localhost；其他类型返回空 NOERROR。
+      - element: _build_hosts_answer
+        type: function
+        location: plugins/domain_rule.py:247
+        description: hosts 模式仅对匹配 qtype 生成 RRSet，未匹配则继续转发。
+    language: python
+    lines: 279
+
+  - file: ip_rule.py
+    path: plugins/ip_rule.py
+    purpose: 按 `answer.tags` 与 ipset 标签改写 A/AAAA rrset，并支持前缀保留。
+    key_elements:
+      - element: IPRuleResolverHook
+        type: class
+        location: plugins/ip_rule.py:188
+        description: resolver 阶段改写入口，支持 `skip_result_tags`。
+      - element: _rewrite_rrset
+        type: function
+        location: plugins/ip_rule.py:282
+        description: 按记录逐条改写；同 replacement.tag 仅保留首个命中记录。
+      - element: _rewrite_ip_prefix
+        type: function
+        location: plugins/ip_rule.py:359
+        description: 位运算保留源地址后缀并替换目标前缀。
+    language: python
+    lines: 390
+
+  - file: tagset.py
+    path: plugins/tagset.py
+    purpose: 从 CNAME 链补充标签并对 ads 结果执行 uncloaking 拦截。
+    key_elements:
+      - element: TagSetResolverHook
+        type: class
+        location: plugins/tagset.py:27
+        description: resolver 阶段根据 CNAME 链动态扩展 `answer.tags`。
+      - element: _match_cname_tags
+        type: function
+        location: plugins/tagset.py:66
+        description: 扫描 `chaining_result.cnames` 与 canonical_name 做 domainset 匹配。
+      - element: _build_blocked_answer
+        type: function
+        location: plugins/tagset.py:96
+        description: ads 命中时 A/AAAA 回环；非地址类型返回空 NOERROR。
+    language: python
+    lines: 131
+
+  - file: speedcheck.py
+    path: plugins/speedcheck.py
+    purpose: 收集 RTT 数据并在 response 阶段按 RTT 重写 A/AAAA 最终返回。
+    key_elements:
+      - element: SpeedCheckResolverHook
+        type: class
+        location: plugins/speedcheck.py:51
+        description: 提取候选 IP，按请求内去重后测速并写入 `ctx.ip_list.results`。
+      - element: RewriteAnswerByRTTHook
+        type: class
+        location: plugins/speedcheck.py:163
+        description: 基于 `select_best_answer` 构造基础答案并按 RTT 回填地址 RRSet。
+      - element: _extract_ips
+        type: function
+        location: plugins/speedcheck.py:296
+        description: 从 `answer.rrset` 提取 A/AAAA，保持顺序并去重。
+    language: python
+    lines: 327
+
+  - file: https_record.py
+    path: plugins/https_record.py
+    purpose: 清洗 HTTPS RR（h3/hints）并按 Cloudflare 判定注入 ECH。
+    key_elements:
+      - element: HttpsRecordResponseHook
+        type: class
+        location: plugins/https_record.py:42
+        description: response 阶段 HTTPS 记录改写主入口。
+      - element: _skip_reason
+        type: function
+        location: plugins/https_record.py:197
+        description: qtype/opcode/qclass/rcode/tags 等前置 guard。
+      - element: _fetch_cached_ech_value
+        type: function
+        location: plugins/https_record.py:338
+        description: 使用 `async_lru` 缓存 ECH 来源查询结果（TTL=300s）。
+    language: python
+    lines: 383
+
+  - file: speedcheck.py
+    path: plugins/utils/speedcheck.py
+    purpose: 单 IP/多 IP 探测实现与 async-lru 缓存配置管理。
+    key_elements:
+      - element: probe_ips
+        type: function
+        location: plugins/utils/speedcheck.py:31
+        description: 同轮测速先去重，再并发调用 `probe_one_ip`。
+      - element: probe_one_ip
+        type: function
+        location: plugins/utils/speedcheck.py:56
+        description: ICMP + TCP(80/443) 并发，返回首个成功 RTT。
+      - element: configure
+        type: function
+        location: plugins/utils/speedcheck.py:71
+        description: 动态调整缓存参数并重装饰 `probe_one_ip`。
+    language: python
+    lines: 179
+
+  - file: config.py
+    path: config.py
+    purpose: hook/resolver 配置归一化、语义校验、顺序约束与运行时装配。
+    key_elements:
+      - element: RuntimeSemanticConfigModel._validate_runtime
+        type: function
+        location: config.py:356
+        description: 校验 `domain_rules/ip_rules/https_record` 语义一致性。
+      - element: _validate_request_hook_order
+        type: function
+        location: config.py:658
+        description: 强制 `DomainRuleRequestHook` 在 `CacheHook` 之后。
+      - element: _validate_resolver_hook_order
+        type: function
+        location: config.py:673
+        description: 强制 `TagSet` 在 `IPRule` 之前，且二者均在 `SpeedCheck` 之前。
+    language: python
+    lines: 759
+
+  - file: resolver_manager.py
+    path: upstream/resolver_manager.py
+    purpose: 上游并发收集 + resolver hooks 调用 + first_success/wait_all 策略。
+    key_elements:
+      - element: collect
+        type: function
+        location: upstream/resolver_manager.py:34
+        description: A/AAAA wait_all；其他类型 first_success 提前结束。
+      - element: _run_resolver_hooks
+        type: function
+        location: upstream/resolver_manager.py:159
+        description: 单 hook 超时/异常隔离，不中断整个请求。
+      - element: _resolver_hook_skip_reason
+        type: function
+        location: upstream/resolver_manager.py:218
+        description: 对非 NOERROR/非法 opcode/qclass 的结果跳过 resolver hooks。
+    language: python
+    lines: 231
+
+  - file: pipeline.py
+    path: core/pipeline.py
+    purpose: request -> upstream -> response 三阶段编排与 pending request 收敛。
+    key_elements:
+      - element: Pipeline._process_with_timeout
+        type: function
+        location: core/pipeline.py:52
+        description: 统一运行阶段，异常时 fail pending，成功时 resolve pending。
+      - element: _run_request_hooks
+        type: function
+        location: core/pipeline.py:89
+        description: request hooks 可通过 `ctx.stop` 短路。
+    language: python
+    lines: 122
+
+  - file: test_domainset_ipset_core.py
+    path: tests/test_domainset_ipset_core.py
+    purpose: domain_rule/ip_rule/tagset/speedcheck 组合语义与边界条件测试。
+    key_elements:
+      - element: test_domain_rule_should_intercept_a_query
+        type: function
+        location: tests/test_domainset_ipset_core.py:137
+        description: 验证 intercept A 路径短路语义与回环地址。
+      - element: test_ip_rule_should_rewrite_each_source_ip_by_its_own_tag
+        type: function
+        location: tests/test_domainset_ipset_core.py:559
+        description: 验证逐 IP 匹配与前缀保留改写逻辑。
+      - element: test_ip_rule_should_run_before_speedcheck
+        type: function
+        location: tests/test_domainset_ipset_core.py:734
+        description: 验证先改写后测速的顺序依赖。
+    language: python
+    lines: 782
+
+  - file: test_https_record_hook.py
+    path: tests/test_https_record_hook.py
+    purpose: HTTPS 记录改写、ECH 注入、缓存行为与跳过条件测试。
+    key_elements:
+      - element: test_should_remove_only_h3_from_alpn
+        type: function
+        location: tests/test_https_record_hook.py:157
+        description: 验证 ALPN 中仅移除 h3。
+      - element: test_should_inject_ech_when_subquery_result_matches_cloudflare
+        type: function
+        location: tests/test_https_record_hook.py:264
+        description: 验证 A/AAAA 子查询驱动的 ECH 注入路径。
+      - element: test_should_cache_ech_fetch_for_same_pipeline
+        type: function
+        location: tests/test_https_record_hook.py:311
+        description: 验证 `_fetch_cached_ech_value` 的缓存命中。
+    language: python
+    lines: 345
+
+patterns_found:
+  - category: architecture
+    pattern: 分阶段 Hook 职责分离 + 配置层顺序强校验
+    description: 插件依赖通过 `RequestHook/ResolverHook/ResponseHook` 明确分段，并由 `config.py` 对关键顺序做硬约束，降低运行时语义漂移。
+    examples:
+      - file: core/hooks.py
+        location: core/hooks.py:10
+        snippet: "class RequestHook(ABC) ... class ResolverHook(ABC) ... class ResponseHook(ABC)"
+      - file: config.py
+        location: config.py:658
+        snippet: "DomainRuleRequestHook 必须位于 CacheHook 之后"
+      - file: config.py
+        location: config.py:687
+        snippet: "TagSetResolverHook 必须位于 IPRuleResolverHook 之前"
+    prevalence: common
+
+  - category: structure
+    pattern: 插件配置标准化函数同形重复
+    description: 各插件普遍以 `normalize_*_hook_kwargs` 包装 `ConfigModel.model_validate` 与 `model_dump`，结构一致。
+    examples:
+      - file: plugins/cache.py
+        location: plugins/cache.py:143
+        snippet: "config = CacheHookConfigModel.model_validate(...)"
+      - file: plugins/ip_rule.py
+        location: plugins/ip_rule.py:146
+        snippet: "config = IPRuleHookConfigModel.model_validate(...)"
+      - file: plugins/https_record.py
+        location: plugins/https_record.py:190
+        snippet: "config = HttpsRecordResponseHookConfigModel.model_validate(...)"
+    prevalence: common
+
+  - category: structure
+    pattern: RRSet 构造辅助函数重复
+    description: `domain_rule/ip_rule/speedcheck` 都有同名 `_build_ip_rrset`，参数与循环逻辑高度相似。
+    examples:
+      - file: plugins/domain_rule.py
+        location: plugins/domain_rule.py:267
+        snippet: "def _build_ip_rrset(...): rrset = dns.rrset.RRset(...); rrset.add(...)"
+      - file: plugins/ip_rule.py
+        location: plugins/ip_rule.py:378
+        snippet: "def _build_ip_rrset(...): rrset = dns.rrset.RRset(...); rrset.add(...)"
+      - file: plugins/speedcheck.py
+        location: plugins/speedcheck.py:315
+        snippet: "def _build_ip_rrset(...): rrset = dns.rrset.RRset(...); rrset.add(...)"
+    prevalence: occasional
+
+  - category: error_handling
+    pattern: 前置 guard + 跳过而非抛错
+    description: 对不满足处理前提的响应，优先 `return` 或记录 `reason`，减少对主流程干扰。
+    examples:
+      - file: upstream/resolver_manager.py
+        location: upstream/resolver_manager.py:218
+        snippet: "_resolver_hook_skip_reason: non_noerror/invalid_opcode/invalid_qclass"
+      - file: plugins/https_record.py
+        location: plugins/https_record.py:197
+        snippet: "_skip_reason: unsupported_qtype/invalid_opcode/invalid_qclass"
+      - file: upstream/resolver_manager.py
+        location: upstream/resolver_manager.py:176
+        snippet: "resolver hook超时/异常，已忽略"
+    prevalence: common
+
+  - category: performance
+    pattern: 多层缓存与去重并存
+    description: 请求级、插件级、跨请求缓存均已存在，但部分路径仍会重复子查询。
+    examples:
+      - file: plugins/speedcheck.py
+        location: plugins/speedcheck.py:99
+        snippet: "pending = [ip for ip in ips if ip not in ctx.ip_list.results]"
+      - file: plugins/utils/speedcheck.py
+        location: plugins/utils/speedcheck.py:52
+        snippet: "alru_cache(maxsize=_probe_cache_max_size, ttl=_probe_cache_ttl_s)"
+      - file: plugins/https_record.py
+        location: plugins/https_record.py:308
+        snippet: "_subqueries_indicate_cloudflare: 每次判定发起 A/AAAA 内部查询"
+    prevalence: occasional
+
+related_architecture:
+  components_relevant_to_domain:
+    - component: Pipeline
+      responsibility: 统一编排 request/upstream/response
+      location: core/pipeline.py
+      relationship_to_domain: domain depends on this
+    - component: ResolverManager
+      responsibility: 并发查询并驱动 resolver hooks
+      location: upstream/resolver_manager.py
+      relationship_to_domain: domain depends on this
+    - component: RuntimeSemanticConfigModel
+      responsibility: 对插件顺序与规则引用关系做静态校验
+      location: config.py
+      relationship_to_domain: domain depends on this
+    - component: Answer
+      responsibility: rrset/message/rcode/chaining 一致性维护
+      location: core/answer.py
+      relationship_to_domain: domain depends on this
+    - component: domainset/ipset
+      responsibility: 标签匹配基础设施
+      location: core/domainset.py + core/ipset.py
+      relationship_to_domain: domain depends on this
+  interfaces_used_by_domain:
+    - interface: RequestHook
+      location: core/hooks.py
+      usage_pattern: DomainRuleRequestHook、CacheHook(request)
+    - interface: ResolverHook
+      location: core/hooks.py
+      usage_pattern: TagSetResolverHook/IPRuleResolverHook/SpeedCheckResolverHook
+    - interface: ResponseHook
+      location: core/hooks.py
+      usage_pattern: CacheHook(response)/RewriteAnswerByRTTHook/HttpsRecordResponseHook
+  data_flow_involving_domain: "QueryContext 在 request 阶段写入 tags/state/stop；ResolverManager 将 resolver 结果流经 resolver hooks 形成 candidates；response 阶段根据 candidates/ip_list 生成 final_answer 并做 HTTPS/缓存后处理。"
+  key_relationships_to_domain:
+    - from: config.py
+      to: plugins/*.py
+      relationship: imports
+    - from: core/pipeline.py
+      to: upstream/resolver_manager.py
+      relationship: calls
+    - from: upstream/resolver_manager.py
+      to: plugins/tagset.py + plugins/ip_rule.py + plugins/speedcheck.py
+      relationship: calls
+    - from: plugins/https_record.py
+      to: core/pipeline.Pipeline.resolve
+      relationship: calls
+
+related_technology_stack:
+  languages_used_in_domain:
+    - Python 3.13+
+  frameworks_used_in_domain:
+    - name: unittest (stdlib)
+      usage_in_domain: 插件与配置语义的单元/集成测试
+  libraries_used_in_domain:
+    - name: dnspython
+      purpose_in_domain: DNS 消息、RRSet、rcode/opcode、DoH/DoQ 支撑
+    - name: pydantic v2
+      purpose_in_domain: 插件配置模型校验与归一化
+    - name: async-lru
+      purpose_in_domain: ECH 查询缓存与测速函数缓存
+    - name: icmplib
+      purpose_in_domain: Speedcheck ICMP 探测
+    - name: py-radix
+      purpose_in_domain: ipset 标签匹配
+    - name: marisa-trie
+      purpose_in_domain: domainset 匹配
+  external_apis_used_in_domain:
+    - name: 公网 DNS 上游（UDP/TCP/TLS/HTTPS/QUIC）
+      integration_point: resolver 层返回 Answer 后进入插件链
+
+related_conventions:
+  naming_patterns_in_domain: "类名采用 `*Hook`，配置模型 `*ConfigModel`，归一化函数 `normalize_*`，跳过日志使用 `reason=...`。"
+  structure_of_domain: "插件文件内通常按：常量/ConfigModel -> Hook 类 -> 纯辅助函数 -> normalize 导出。"
+  error_handling_in_domain: "优先 guard + return；resolver hook 内部异常/超时隔离（不中断主查询）。"
+  testing_in_domain: "每个插件有独立测试文件；顺序与语义约束集中在 `tests/test_config.py`。"
+  documentation_in_domain: "README 与 AGENTS.md 对 hook 顺序约束、A/AAAA wait_all 策略有文档化说明。"
+
+related_dependencies:
+  internal:
+    - component: config.py
+      relationship_to_domain: 插件构建、kwargs 归一化、顺序约束
+      direction: inbound
+    - component: core/context.py
+      relationship_to_domain: 所有插件共享运行态容器 `QueryContext`
+      direction: bidirectional
+    - component: core/answer.py
+      relationship_to_domain: 插件通过 `replace_rrset/set_rcode/update_message` 改写响应
+      direction: outbound
+    - component: upstream/selector.py
+      relationship_to_domain: `RewriteAnswerByRTTHook` 依赖其选择基础答案
+      direction: outbound
+    - component: core/cache.py
+      relationship_to_domain: CacheHook 依赖缓存键、pending 合并与 TTL 改写
+      direction: outbound
+  external:
+    - name: dnspython
+      purpose_for_domain: RRSet 构造、DNS 协议字段判定、消息链处理
+    - name: pydantic
+      purpose_for_domain: 配置约束与错误提示
+    - name: async-lru
+      purpose_for_domain: 异步缓存能力
+    - name: icmplib
+      purpose_for_domain: 网络 RTT 采样
+
+domain_security_considerations:
+  sensitive_areas:
+    - area: 响应合法性前置校验
+      location: upstream/resolver_manager.py:218, plugins/https_record.py:197
+      concern: 仅处理 QUERY/IN/NOERROR 等合法上下文，降低异常响应进入插件链风险。
+    - area: 插件短路与本地拦截
+      location: plugins/domain_rule.py:214, plugins/tagset.py:96
+      concern: 拦截路径必须保持 CNAME 链与 Answer 同步，避免语义破坏。
+  authentication_patterns_in_domain: "未涉及身份认证。"
+  authorization_patterns_in_domain: "未涉及权限模型。"
+  data_validation_in_domain: "配置侧由 pydantic + config 语义校验双层验证；运行时由 guard 判断协议字段。"
+
+testing_patterns:
+  framework: unittest (IsolatedAsyncioTestCase + TestCase)
+  coverage_areas:
+    - hook 顺序约束（domain_rule/cache, tagset/ip_rule/speedcheck）
+    - domain_rule intercept/hosts 分支
+    - ip_rule 匹配/改写/skip/prefix 保留
+    - speedcheck 去重、超时容错、RTT 改写
+    - https_record h3/hints/ECH 注入与缓存
+  test_organization: "插件语义测试分散在 `test_domainset_ipset_core.py`、`test_speedcheck_hooks.py`、`test_https_record_hook.py`、`test_cache_hooks.py`、`test_tagset_and_sets.py`，顺序与配置约束集中在 `test_config.py`。"
+  mock_patterns:
+    - 使用 fake probe / fake pipeline / fake resolver 控制异步行为与副作用
+    - 使用 tempfile + 临时规则文件构造 domainset/ipset 场景
+
+requested_conclusions:
+  1_plugin_responsibility_and_boundaries:
+    clarity_assessment: "总体清晰，边界由 Hook 阶段和 config 顺序校验双重限定。"
+    evidence:
+      - "Request: `CacheHook` + `DomainRuleRequestHook`；Resolver: `TagSet/IPRule/SpeedCheck`；Response: `RewriteAnswerByRTTHook` + `HttpsRecordResponseHook`。"
+      - "`config.py` 明确约束 `DomainRule` 在 `Cache` 后、`TagSet` 在 `IPRule` 前、`TagSet/IPRule` 在 `SpeedCheck` 前。"
+      - "`tests/test_config.py` 对上述顺序都有正反用例。"
+
+  2_duplication_and_extractable_common_logic:
+    repeated_logic:
+      - item: "`_build_ip_rrset` 三处重复"
+        locations:
+          - plugins/domain_rule.py:267
+          - plugins/ip_rule.py:378
+          - plugins/speedcheck.py:315
+      - item: "`normalize_*_hook_kwargs` 同形重复"
+        locations:
+          - plugins/cache.py:143
+          - plugins/domain_rule.py:164
+          - plugins/ip_rule.py:146
+          - plugins/speedcheck.py:248
+          - plugins/speedcheck.py:255
+          - plugins/https_record.py:190
+      - item: "响应 guard 判定逻辑相似（opcode/qclass/rcode/qtype）"
+        locations:
+          - upstream/resolver_manager.py:218
+          - plugins/https_record.py:197
+          - plugins/speedcheck.py:188
+    extract_candidates:
+      - "可抽到 `plugins.utils` 的 RRSet 构造函数（保持现有签名适配层）。"
+      - "可抽到统一的 guard helper（返回 reason 字符串），供 resolver_manager/https_record/speedcheck 复用。"
+      - "可抽到通用 kwargs normalizer 工厂函数，减少样板代码。"
+
+  3_stdlib_or_third_party_replacements:
+    observable_points:
+      - point: "RRSet 手工构造可由 `dnspython` 的 `dns.rrset.from_text` 包装替代"
+        current: "三处均手写 `RRset(...); add(...)`"
+        candidate: "dns.rrset.from_text(owner, ttl, 'IN', qtype_text, *ips)"
+      - point: "`asyncio.as_completed + 手工取消` 可由 Python 3.13 `TaskGroup`/`asyncio.timeout` 结构化并发表达"
+        current: "plugins/utils/speedcheck.py 与 upstream/resolver_manager.py 中手工任务管理较多"
+        candidate: "stdlib 结构化并发（语义不变前提下）"
+      - point: "`_CACHE_REGISTRY` 全局共享缓存可用 stdlib 缓存装饰器表达初始化路径"
+        current: "plugins/cache.py 手工 dict 注册"
+        candidate: "functools 缓存语义封装（需保持命名空间行为一致）"
+
+  4_performance_opportunities:
+    avoid_repeated_parsing_matching_io:
+      - item: "HTTPS 记录多 rdata 场景下，Cloudflare 判定可能重复触发 A/AAAA 子查询"
+        location: plugins/https_record.py:118,169,308
+        impact: "同一响应内重复内部 resolve，增加 I/O 与延迟"
+      - item: "`_rewrite_rrset` 内通过 `to_text()` 比较新旧 rdata 产生重复序列化"
+        location: plugins/https_record.py:112
+        impact: "在大 RRSet 上有额外 CPU 开销"
+      - item: "`RewriteAnswerByRTTHook` 对全部 RTT 数据排序，即使只取前 `max_return_ips`"
+        location: plugins/speedcheck.py:213
+        impact: "IP 候选较多时多余排序成本"
+      - item: "ip_rule 对每条源 IP 逐 section 逐 replacement 线性扫描"
+        location: plugins/ip_rule.py:315,351
+        impact: "规则量增大时匹配成本上升"
+
+  5_affected_tests_and_new_cases:
+    directly_affected_existing_tests:
+      - tests/test_cache_hooks.py
+      - tests/test_domainset_ipset_core.py
+      - tests/test_tagset_and_sets.py
+      - tests/test_speedcheck_hooks.py
+      - tests/test_speedcheck_utils.py
+      - tests/test_https_record_hook.py
+      - tests/test_config.py
+      - tests/test_resolver_manager_step3.py
+    suggested_new_cases:
+      - "HTTPS rrset 含多条 rdata 且均无 ECH：断言同一 `owner_name` 仅触发一次 A/AAAA 子查询判定。"
+      - "抽取公共 `_build_ip_rrset` 后：对 A/AAAA、TTL、owner_name 保持一致性的参数化回归。"
+      - "统一 guard helper 后：对 `invalid_opcode/invalid_qclass/non_noerror` 的 reason 语义一致性测试。"
+      - "speedcheck top-k 选择优化后：在大量 IP 候选下结果与旧逻辑完全一致。"
+
+  6_low_risk_refactor_sequence:
+    inferred_sequence:
+      - step: "阶段 1：提取纯函数（`_build_ip_rrset`、kwargs normalizer 工厂），不改调用顺序"
+        risk: low
+        dependency_basis: "无状态、可由现有单测直接覆盖"
+      - step: "阶段 2：合并 guard 判定逻辑（保持 reason 文案与分支行为一致）"
+        risk: low
+        dependency_basis: "`resolver_manager` 与 `https_record` 已有细粒度跳过测试"
+      - step: "阶段 3：`https_record` 响应内缓存 Cloudflare 判定结果，避免重复子查询"
+        risk: low-medium
+        dependency_basis: "仅限 response 插件内部状态，不影响外部 API"
+      - step: "阶段 4：`speedcheck/ip_rule` 微优化（top-k/匹配索引），保持输出等价"
+        risk: medium
+        dependency_basis: "依赖前述公共函数稳定后再做性能细化"
+
+open_questions:
+  - question: "`HttpsRecordResponseHook` 对同一 rrset 多条 rdata 是否允许仅做一次 Cloudflare 子查询判定并复用结果？"
+    context: "当前实现按 rdata 调用 `_should_inject_ech`，存在重复 I/O 可能，但是否有按 rdata 差异化判定需求尚不明确。"
+  - question: "`ip_rule` 当前‘同 replacement.tag 仅保留首个命中’是严格业务要求还是实现约束？"
+    context: "该语义影响去重策略与后续匹配优化空间。"
+  - question: "`config.py` 中 hook kwargs 归一化是否允许引入统一工厂函数而不改变错误信息文本？"
+    context: "测试中存在大量 `assertRaisesRegex`，错误文案兼容性可能成为约束。"
+
+gaps:
+  - area: 运行时性能基线
+    description: "本次为静态只读调研，未执行基准测试与火焰图分析。"
+    impact: "性能收益只能给出热点位点，无法给出量化收益排序。"
+  - area: 真实生产规则规模
+    description: "未获取生产 `domainset/ipset/ip_rules` 规模与命中分布。"
+    impact: "对 `ip_rule` 匹配复杂度优化的优先级判断存在不确定性。"
+  - area: ECH 注入策略的业务边界
+    description: "未看到更高层产品策略文档（仅从测试与实现推断）。"
+    impact: "某些‘减少子查询’优化是否完全等价仍需业务侧确认。"

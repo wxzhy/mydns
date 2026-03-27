@@ -13,6 +13,7 @@ import dns.rdatatype
 from core.context import QueryContext
 from core.hooks import ResolverHook
 from core.models import ResolverResult
+from core.response_guard import response_guard_reason
 from logger import get_logger
 from resolver.resolver import Resolver
 
@@ -35,22 +36,25 @@ class ResolverManager:
 
     async def collect(self, ctx: QueryContext, timeout_s: float) -> None:
         """并发收集上游结果，并写入 ctx.candidates。"""
-        matched = [r for r in self.resolvers if self._resolver_match_tags(r, ctx.tags)]
+        matched_with_timeout = [
+            (resolver, resolver.effective_timeout(timeout_s))
+            for resolver in self.resolvers
+            if self._resolver_match_tags(resolver, ctx.tags)
+        ]
         wait_all = _need_wait_all_results(ctx.query.qtype)
         logger.debug(
             "开始上游并发查询 qname=%s qtype=%s tags=%s matched=%s timeout=%.3fs strategy=%s",
             ctx.query.qname.to_text(),
             ctx.query.qtype,
             sorted(ctx.tags),
-            [x.name for x in matched],
+            [x.name for x, _ in matched_with_timeout],
             timeout_s,
             "wait_all" if wait_all else "first_success",
         )
-        if not matched:
+        if not matched_with_timeout:
             return
 
-        for resolver in matched:
-            effective_timeout_s = resolver.effective_timeout(timeout_s)
+        for resolver, effective_timeout_s in matched_with_timeout:
             logger.debug(
                 "并发调度 resolver=%s qname=%s qtype=%s timeout=%.3fs",
                 resolver.name,
@@ -59,49 +63,44 @@ class ResolverManager:
                 effective_timeout_s,
             )
 
-        tasks = [
-            asyncio.create_task(self._query_one(resolver, ctx, timeout_s))
-            for resolver in matched
-        ]
+        tasks = {
+            asyncio.create_task(self._query_one(resolver, ctx, effective_timeout_s))
+            for resolver, effective_timeout_s in matched_with_timeout
+        }
+        pending = set(tasks)
 
-        for completed in asyncio.as_completed(tasks):
-            result = await completed
-            processed = await self._run_resolver_hooks(ctx, result)
-            if processed is not None:
-                ctx.candidates.append(processed)
-                logger.debug(
-                    "上游结果保留 resolver=%s elapsed_ms=%.2f rcode=%s error=%s",
-                    processed.resolver_name,
-                    processed.elapsed_ms or -1,
-                    processed.answer.response.rcode()
-                    if processed.answer is not None
-                    else None,
-                    repr(processed.error) if processed.error else None,
-                )
-                if not wait_all and _is_normal_result(processed):
-                    ctx.final_answer = processed.answer
+        try:
+            for completed in asyncio.as_completed(tasks):
+                result = await completed
+                pending.discard(completed)
+
+                processed = await self._run_resolver_hooks(ctx, result)
+                if processed is not None:
+                    ctx.candidates.append(processed)
                     logger.debug(
-                        "非A/AAAA已获得首个正常结果 resolver=%s，写入final_answer并提前结束等待",
+                        "上游结果保留 resolver=%s elapsed_ms=%.2f rcode=%s error=%s",
                         processed.resolver_name,
+                        processed.elapsed_ms or -1,
+                        processed.answer.response.rcode()
+                        if processed.answer is not None
+                        else None,
+                        repr(processed.error) if processed.error else None,
                     )
-                    break
-            else:
-                logger.debug(
-                    "上游结果被hook丢弃 resolver=%s",
-                    result.resolver_name,
-                )
-
-        pending = [task for task in tasks if not task.done()]
-        for task in pending:
-            task.cancel()
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
-            logger.debug(
-                "已取消未完成上游任务 qname=%s qtype=%s canceled=%s",
-                ctx.query.qname.to_text(),
-                ctx.query.qtype,
-                len(pending),
-            )
+                    if not wait_all and _is_normal_result(processed):
+                        ctx.final_answer = processed.answer
+                        logger.debug(
+                            "非A/AAAA已获得首个正常结果 resolver=%s，写入final_answer并提前结束等待",
+                            processed.resolver_name,
+                        )
+                        await self._cancel_pending_tasks(ctx, pending)
+                        break
+                else:
+                    logger.debug(
+                        "上游结果被hook丢弃 resolver=%s",
+                        result.resolver_name,
+                    )
+        finally:
+            await self._cancel_pending_tasks(ctx, pending)
 
     @staticmethod
     def _resolver_match_tags(resolver: Resolver, tags: set[str]) -> bool:
@@ -113,10 +112,9 @@ class ResolverManager:
         self,
         resolver: Resolver,
         ctx: QueryContext,
-        timeout_s: float,
+        effective_timeout_s: float,
     ) -> ResolverResult:
         start = time.perf_counter()
-        effective_timeout_s = resolver.effective_timeout(timeout_s)
         logger.debug(
             "上游请求开始 resolver=%s qname=%s qtype=%s timeout=%.3fs",
             resolver.name,
@@ -155,6 +153,30 @@ class ResolverManager:
             answer=answer,
             elapsed_ms=elapsed_ms,
             error=error,
+        )
+
+    async def _cancel_pending_tasks(
+        self,
+        ctx: QueryContext,
+        pending: set[asyncio.Task[ResolverResult]],
+    ) -> None:
+        if not pending:
+            return
+
+        tasks = tuple(task for task in pending if not task.done())
+        pending.clear()
+        if not tasks:
+            return
+
+        for task in tasks:
+            task.cancel()
+
+        await asyncio.gather(*tasks, return_exceptions=True)
+        logger.debug(
+            "已取消未完成上游任务 qname=%s qtype=%s canceled=%s",
+            ctx.query.qname.to_text(),
+            ctx.query.qtype,
+            len(tasks),
         )
 
     async def _run_resolver_hooks(
@@ -219,13 +241,4 @@ def _resolver_hook_skip_reason(result: ResolverResult) -> str | None:
     if result.error is not None or result.answer is None:
         return "answer_or_error"
 
-    response = result.answer.response
-    if response.rcode() != dns.rcode.NOERROR:
-        return "non_noerror"
-    if response.opcode() != dns.opcode.QUERY:
-        return "invalid_opcode"
-    if not response.question:
-        return "missing_question"
-    if response.question[0].rdclass != dns.rdataclass.IN:
-        return "invalid_qclass"
-    return None
+    return response_guard_reason(result.answer.response, noerror_reason="non_noerror")

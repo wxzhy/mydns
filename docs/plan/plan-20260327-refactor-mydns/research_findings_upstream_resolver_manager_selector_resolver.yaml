@@ -1,0 +1,584 @@
+plan_id: plan-20260327-refactor-mydns
+objective: 全项目重构与性能优化（功能不变）
+focus_area: upstream/resolver_manager.py + upstream/selector.py + resolver/*
+created_at: "2026-03-27"
+created_by: gem-researcher
+status: completed
+
+tldr: |
+  - 上游并发策略由 `ResolverManager.collect` 决定：`A/AAAA` 走 `wait_all`，其余类型（包含 `HTTPS`）走 `first_success`，并在拿到首个 NOERROR 后提前结束。
+  - 选择策略由 `upstream/selector.py` 与 `plugins/speedcheck.py` 组合完成：优先 `ads` 标签结果，其次按耗时选最快 NOERROR，否则回退最快响应。
+  - 可观测冗余主要集中在超时计算与消息拷贝链路：`effective_timeout` 多次重复、请求报文 `to_wire/from_wire` 每 resolver 重复执行、选择器存在多次遍历+全量排序。
+  - `HTTPS` 查询在主收集阶段不等待全量上游，但 `HttpsRecordResponseHook` 可能触发 `A/AAAA` 子查询与 ECH 来源查询，形成嵌套查询放大效应。
+  - 现有测试已覆盖 A/AAAA 与 non-A 分支、resolver 超时/异常、多协议 resolver 参数透传；但 `HTTPS` 在 `ResolverManager` 分支与若干性能边界尚无直接回归。
+
+research_metadata:
+  methodology: "三轮混合检索：semantic_search（尝试，返回空）+ grep_search（分支/调用链定位）+ read_file（实现细读）+ 文件行数统计（只读）"
+  scope: "聚焦 upstream/resolver_manager.py、upstream/selector.py、resolver/*，并扩展读取 core/pipeline.py、plugins/speedcheck.py、plugins/https_record.py 与相关 tests 以确认真实运行链路"
+  confidence: high
+  coverage: 93
+
+files_analyzed:
+  - file: resolver_manager.py
+    path: c:/Users/Huawei/Documents/Dev/mydns/upstream/resolver_manager.py
+    purpose: 上游并发调度、结果收集、resolver hook 执行与提前结束策略
+    key_elements:
+      - element: ResolverManager.collect
+        type: function
+        location: upstream/resolver_manager.py:36
+        description: 按 tags 过滤 resolver，创建并发任务；A/AAAA 等待全量，其他类型首个正常结果提前结束。
+      - element: ResolverManager._query_one
+        type: function
+        location: upstream/resolver_manager.py:108
+        description: 单 resolver 请求执行、超时包裹、耗时统计、异常转 ResolverResult。
+      - element: ResolverManager._run_resolver_hooks
+        type: function
+        location: upstream/resolver_manager.py:147
+        description: 对单结果执行 resolver hook，单 hook 超时/异常隔离。
+      - element: _need_wait_all_results
+        type: function
+        location: upstream/resolver_manager.py:206
+        description: 仅 A/AAAA 返回 True；HTTPS 归入 first_success 分支。
+      - element: _resolver_hook_skip_reason
+        type: function
+        location: upstream/resolver_manager.py:218
+        description: 对 error/non-NOERROR/非法 opcode/qclass 等结果跳过 resolver hook。
+    language: python
+    lines: 231
+
+  - file: selector.py
+    path: c:/Users/Huawei/Documents/Dev/mydns/upstream/selector.py
+    purpose: 候选结果聚合选择
+    key_elements:
+      - element: select_best_answer
+        type: function
+        location: upstream/selector.py:18
+        description: 过滤空 answer、优先 ads 标签、再选择最快正常结果，空候选回退 SERVFAIL。
+      - element: _select_fastest_normal
+        type: function
+        location: upstream/selector.py:48
+        description: 先按 elapsed_ms 排序后选首个 NOERROR，否则取最先项。
+      - element: _candidate_speed_key
+        type: function
+        location: upstream/selector.py:70
+        description: 将 elapsed_ms=None 视为无穷大。
+    language: python
+    lines: 75
+
+  - file: resolver.py
+    path: c:/Users/Huawei/Documents/Dev/mydns/resolver/resolver.py
+    purpose: 上游 resolver 抽象与请求报文构造
+    key_elements:
+      - element: Resolver.effective_timeout
+        type: function
+        location: resolver/resolver.py:47
+        description: resolver-level timeout 覆盖全局 timeout。
+      - element: Resolver.build_request_message
+        type: function
+        location: resolver/resolver.py:53
+        description: 基于 Query 构造可发送请求，处理 ECS 覆盖。
+      - element: _copy_request_message
+        type: function
+        location: resolver/resolver.py:88
+        description: 从 Query.message 执行 `to_wire/from_wire` 深拷贝，或 make_query 新建。
+      - element: _replace_ecs_option
+        type: function
+        location: resolver/resolver.py:104
+        description: 删除已有 ECS 并插入目标 ECS。
+    language: python
+    lines: 117
+
+  - file: udp_resolver.py
+    path: c:/Users/Huawei/Documents/Dev/mydns/resolver/udp_resolver.py
+    purpose: UDP 上游查询
+    key_elements:
+      - element: UdpUpstreamResolver.resolve
+        type: function
+        location: resolver/udp_resolver.py:34
+        description: 构建请求，按需启用 TrickyDatagramSocket，调用 dns.asyncquery.udp。
+    language: python
+    lines: 59
+
+  - file: tcp_resolver.py
+    path: c:/Users/Huawei/Documents/Dev/mydns/resolver/tcp_resolver.py
+    purpose: TCP 上游查询
+    key_elements:
+      - element: TcpUpstreamResolver.resolve
+        type: function
+        location: resolver/tcp_resolver.py:34
+        description: 构建请求，按需启用 TrickyStreamSocket，调用 dns.asyncquery.tcp。
+    language: python
+    lines: 59
+
+  - file: tls_resolver.py
+    path: c:/Users/Huawei/Documents/Dev/mydns/resolver/tls_resolver.py
+    purpose: DoT 上游查询
+    key_elements:
+      - element: TlsUpstreamResolver.resolve
+        type: function
+        location: resolver/tls_resolver.py:32
+        description: 透传 verify/server_hostname，调用 dns.asyncquery.tls。
+    language: python
+    lines: 51
+
+  - file: https_resolver.py
+    path: c:/Users/Huawei/Documents/Dev/mydns/resolver/https_resolver.py
+    purpose: DoH 上游查询与连接池复用
+    key_elements:
+      - element: _shared_client
+        type: variable
+        location: resolver/https_resolver.py:16
+        description: 全局 AsyncClient（HTTP/2 + 连接池）跨 resolver 实例复用。
+      - element: HttpsUpstreamResolver.resolve
+        type: function
+        location: resolver/https_resolver.py:43
+        description: 调用 dns.asyncquery.https，支持 bootstrap_address 与 resolver。
+      - element: HttpsUpstreamResolver._build_where
+        type: function
+        location: resolver/https_resolver.py:62
+        description: address 非 URL 时补全 https://。
+    language: python
+    lines: 72
+
+  - file: quic_resolver.py
+    path: c:/Users/Huawei/Documents/Dev/mydns/resolver/quic_resolver.py
+    purpose: DoQ 上游查询
+    key_elements:
+      - element: QuicUpstreamResolver.resolve
+        type: function
+        location: resolver/quic_resolver.py:33
+        description: 调用 dns.asyncquery.quic，透传 verify/hostname/server_hostname。
+    language: python
+    lines: 54
+
+  - file: resolver/tricks/udp_trick.py
+    path: c:/Users/Huawei/Documents/Dev/mydns/resolver/tricks/udp_trick.py
+    purpose: UDP tricks socket 封装
+    key_elements:
+      - element: TrickyDatagramSocket.recvfrom
+        type: function
+        location: resolver/tricks/udp_trick.py:84
+        description: 最多 5 次读取并校验特征字节，不满足则继续等待。
+      - element: _TrickyDatagramProtocol.recvfrom
+        type: function
+        location: resolver/tricks/udp_trick.py:33
+        description: 基于 queue + wait_for 提供带超时接收。
+    language: python
+    lines: 127
+
+  - file: resolver/tricks/tcp_trick.py
+    path: c:/Users/Huawei/Documents/Dev/mydns/resolver/tricks/tcp_trick.py
+    purpose: TCP tricks socket 封装
+    key_elements:
+      - element: _wait_for
+        type: function
+        location: resolver/tricks/tcp_trick.py:12
+        description: 统一 awaitable 超时封装。
+      - element: TrickyStreamSocket.sendall
+        type: function
+        location: resolver/tricks/tcp_trick.py:34
+        description: 大报文前 16 字节走 OOB，同步 sendall 后其余异步发送。
+    language: python
+    lines: 65
+
+  - file: core/pipeline.py
+    path: c:/Users/Huawei/Documents/Dev/mydns/core/pipeline.py
+    purpose: 三阶段流水线与 ResolverManager 调用入口
+    key_elements:
+      - element: Pipeline._run_upstream
+        type: function
+        location: core/pipeline.py:95
+        description: 调用 resolver_manager.collect。
+      - element: Pipeline._fallback_answer
+        type: function
+        location: core/pipeline.py:101
+        description: 无 final_answer 时回退 SERVFAIL。
+    language: python
+    lines: 122
+
+  - file: plugins/speedcheck.py
+    path: c:/Users/Huawei/Documents/Dev/mydns/plugins/speedcheck.py
+    purpose: resolver 阶段测速与 response 阶段 A/AAAA 回写
+    key_elements:
+      - element: SpeedCheckResolverHook.on_resolver_result
+        type: function
+        location: plugins/speedcheck.py:68
+        description: 对 A/AAAA rrset 提取 IP 并测速，结果写入 ctx.ip_list.results。
+      - element: RewriteAnswerByRTTHook.on_response
+        type: function
+        location: plugins/speedcheck.py:170
+        description: final_answer 为空时调用 select_best_answer；A/AAAA 且有 RTT 时重写地址 rrset。
+      - element: _extract_ips
+        type: function
+        location: plugins/speedcheck.py:295
+        description: 仅提取 Answer.rrset 的 A/AAAA 地址并保持顺序去重。
+    language: python
+    lines: 327
+
+  - file: plugins/https_record.py
+    path: c:/Users/Huawei/Documents/Dev/mydns/plugins/https_record.py
+    purpose: HTTPS rrset 清洗（h3/hints）与 Cloudflare ECH 注入
+    key_elements:
+      - element: HttpsRecordResponseHook.on_response
+        type: function
+        location: plugins/https_record.py:53
+        description: 仅对 HTTPS 查询与合法 response 进行改写。
+      - element: _subqueries_indicate_cloudflare
+        type: function
+        location: plugins/https_record.py:315
+        description: 并发发起 A/AAAA 子查询判断是否 cloudflare。
+      - element: _fetch_cached_ech_value
+        type: function
+        location: plugins/https_record.py:338
+        description: 使用 alru_cache 缓存 ECH 来源查询结果（TTL 300s）。
+    language: python
+    lines: 383
+
+  - file: tests/test_resolver_manager_step3.py
+    path: c:/Users/Huawei/Documents/Dev/mydns/tests/test_resolver_manager_step3.py
+    purpose: ResolverManager 并发、超时、hook、分支行为回归
+    key_elements:
+      - element: test_non_a_returns_first_normal
+        type: function
+        location: tests/test_resolver_manager_step3.py:314
+        description: 验证 non-A 提前结束且不等待慢 resolver。
+      - element: test_a_waits_all_resolver_and_hook
+        type: function
+        location: tests/test_resolver_manager_step3.py:335
+        description: 验证 A 类型等待全部上游。
+      - element: test_hook_timeout_should_not_block_request
+        type: function
+        location: tests/test_resolver_manager_step3.py:389
+        description: 验证 resolver hook 超时隔离。
+    language: python
+    lines: 413
+
+  - file: tests/test_selector_step4.py
+    path: c:/Users/Huawei/Documents/Dev/mydns/tests/test_selector_step4.py
+    purpose: 候选选择策略回归
+    key_elements:
+      - element: test_a_fastest_normal_with_cname_chain
+        type: function
+        location: tests/test_selector_step4.py:66
+        description: 验证 A 记录选择后 CNAME 链保留。
+      - element: test_non_a_type_fastest_response_passthrough
+        type: function
+        location: tests/test_selector_step4.py:98
+        description: 验证 non-A 按最快 NOERROR 透传。
+    language: python
+    lines: 124
+
+  - file: tests/test_resolvers_multi_and_tricks.py
+    path: c:/Users/Huawei/Documents/Dev/mydns/tests/test_resolvers_multi_and_tricks.py
+    purpose: 多协议 resolver 与 trick socket 行为回归
+    key_elements:
+      - element: test_https_resolver_should_reuse_shared_client
+        type: function
+        location: tests/test_resolvers_multi_and_tricks.py:270
+        description: 验证 DoH 复用共享 AsyncClient。
+      - element: test_udp_resolver_should_override_or_add_ecs_option
+        type: function
+        location: tests/test_resolvers_multi_and_tricks.py:138
+        description: 验证 ECS 覆盖逻辑。
+    language: python
+    lines: 322
+
+  - file: tests/test_https_record_hook.py
+    path: c:/Users/Huawei/Documents/Dev/mydns/tests/test_https_record_hook.py
+    purpose: HTTPS 记录改写与 ECH 注入回归
+    key_elements:
+      - element: test_should_inject_ech_when_subquery_result_matches_cloudflare
+        type: function
+        location: tests/test_https_record_hook.py:258
+        description: 验证 HTTPS 响应处理会触发 A/AAAA 子查询路径。
+      - element: test_should_cache_ech_fetch_for_same_pipeline
+        type: function
+        location: tests/test_https_record_hook.py:316
+        description: 验证 ECH 来源查询缓存。
+    language: python
+    lines: 345
+
+patterns_found:
+  - category: architecture
+    pattern: 并发收集 + 条件提前结束
+    description: collect 先并发启动所有匹配 resolver，再在 as_completed 循环中按 qtype 分支决定是否提前 break。
+    examples:
+      - file: upstream/resolver_manager.py
+        location: upstream/resolver_manager.py:63-92
+        snippet: "for completed in asyncio.as_completed(tasks): ... if not wait_all and _is_normal_result(processed): ... break"
+    prevalence: common
+
+  - category: architecture
+    pattern: qtype 策略分流
+    description: 仅 A/AAAA 走 wait_all；HTTPS 与 TXT/SRV/PTR 等同属 first_success。
+    examples:
+      - file: upstream/resolver_manager.py
+        location: upstream/resolver_manager.py:206-207
+        snippet: "return qtype in {dns.rdatatype.A, dns.rdatatype.AAAA}"
+      - file: tests/test_resolver_manager_step3.py
+        location: tests/test_resolver_manager_step3.py:314-351
+        snippet: "test_non_a_returns_first_normal / test_a_waits_all_resolver_and_hook"
+    prevalence: common
+
+  - category: structure
+    pattern: 选择器多阶段遍历
+    description: 先构造 candidates 副本，再扫描 ads 标签，再按 elapsed_ms 全量排序后扫描 NOERROR。
+    examples:
+      - file: upstream/selector.py
+        location: upstream/selector.py:20-57
+        snippet: "candidates = [...] ; tagged = _select_tagged_answer(...); ordered = sorted(...)"
+    prevalence: common
+
+  - category: performance
+    pattern: 超时与报文构造重复计算
+    description: timeout 在 manager 与 resolver 两层均计算；请求消息在每 resolver 查询中执行深拷贝与 ECS 重写。
+    examples:
+      - file: upstream/resolver_manager.py
+        location: upstream/resolver_manager.py:53,119
+        snippet: "effective_timeout_s = resolver.effective_timeout(timeout_s)"
+      - file: resolver/udp_resolver.py
+        location: resolver/udp_resolver.py:35
+        snippet: "timeout_s = self.effective_timeout(timeout_s)"
+      - file: resolver/resolver.py
+        location: resolver/resolver.py:88-96
+        snippet: "dns.message.from_wire(query.message.to_wire())"
+    prevalence: common
+
+  - category: architecture
+    pattern: HTTPS 响应插件触发嵌套查询
+    description: HttpsRecordResponseHook 在部分条件下并发发起 A/AAAA 子查询并额外发起 HTTPS ECH 来源查询。
+    examples:
+      - file: plugins/https_record.py
+        location: plugins/https_record.py:315-336
+        snippet: "results = await asyncio.gather(*(pipeline.resolve(query) for query in queries), return_exceptions=True)"
+      - file: plugins/https_record.py
+        location: plugins/https_record.py:338-356
+        snippet: "answer = await pipeline.resolve(query)"
+    prevalence: occasional
+
+  - category: performance
+    pattern: trick UDP 接收重试可能放大等待时长
+    description: recvfrom 每轮都按 timeout 等待，最多 5 轮，最坏等待可接近 5x timeout。
+    examples:
+      - file: resolver/tricks/udp_trick.py
+        location: resolver/tricks/udp_trick.py:84-95
+        snippet: "for _ in range(5): data, addr = await self._protocol.recvfrom(timeout)"
+    prevalence: occasional
+
+related_architecture:
+  components_relevant_to_domain:
+    - component: core.pipeline.Pipeline
+      responsibility: 编排 request/upstream/response 阶段
+      location: core/pipeline.py
+      relationship_to_domain: domain 被该组件调用（_run_upstream）
+    - component: plugins.speedcheck.RewriteAnswerByRTTHook
+      responsibility: 基础答案构造与 A/AAAA RTT 重写
+      location: plugins/speedcheck.py
+      relationship_to_domain: this uses domain outputs（使用 ctx.candidates 与 selector）
+    - component: plugins.https_record.HttpsRecordResponseHook
+      responsibility: HTTPS rrset 改写和 ECH 注入
+      location: plugins/https_record.py
+      relationship_to_domain: this uses domain outputs，并可反向触发 pipeline.resolve 嵌套查询
+    - component: config.build_runtime_config
+      responsibility: resolver/hook 实例装配
+      location: config.py
+      relationship_to_domain: domain depends on this（实例生命周期由配置装配决定）
+
+  interfaces_used_by_domain:
+    - interface: resolver.resolver.Resolver
+      location: resolver/resolver.py
+      usage_pattern: ResolverManager 依赖抽象接口 resolve/effective_timeout
+    - interface: core.hooks.ResolverHook
+      location: core/hooks.py
+      usage_pattern: collect 后对每个结果串行执行 hook（带超时隔离）
+    - interface: dns.asyncquery.*
+      location: resolver/*.py
+      usage_pattern: 各协议 resolver 统一将 QueryMessage 交给 dnspython 异步查询函数
+
+  data_flow_involving_domain: |
+    QueryContext(query,tags) -> ResolverManager.collect(tag过滤 + 并发 resolve) -> ResolverResult 列表写入 ctx.candidates
+    -> (non-A/AAAA 首个 NOERROR 可直接写 ctx.final_answer 并提前结束)
+    -> Response 阶段 RewriteAnswerByRTTHook/select_best_answer 生成/修正 final_answer
+    -> HTTPS 响应路径可通过 HttpsRecordResponseHook 再触发 A/AAAA/HTTPS 内部查询。
+
+  key_relationships_to_domain:
+    - from: core/pipeline.py
+      to: upstream/resolver_manager.py
+      relationship: calls
+    - from: upstream/resolver_manager.py
+      to: resolver/resolver.py
+      relationship: calls
+    - from: resolver/*.py
+      to: dns.asyncquery
+      relationship: calls
+    - from: plugins/speedcheck.py
+      to: upstream/selector.py
+      relationship: calls
+    - from: plugins/https_record.py
+      to: core/pipeline.py::Pipeline.resolve
+      relationship: calls
+
+related_technology_stack:
+  languages_used_in_domain:
+    - Python 3
+  frameworks_used_in_domain: []
+  libraries_used_in_domain:
+    - name: dnspython
+      purpose_in_domain: DNS 报文构造/解析与 asyncquery UDP/TCP/TLS/HTTPS/QUIC 请求
+    - name: asyncio
+      purpose_in_domain: 并发任务调度（as_completed/gather/wait_for/任务取消）
+    - name: httpx
+      purpose_in_domain: DoH 共享连接池客户端
+    - name: async_lru
+      purpose_in_domain: ECH 来源查询与测速缓存
+    - name: icmplib
+      purpose_in_domain: ICMP RTT 探测
+    - name: pydantic
+      purpose_in_domain: 插件/配置参数规范化与校验
+  external_apis_used_in_domain: []
+
+related_conventions:
+  naming_patterns_in_domain: "Resolver 类采用 `*UpstreamResolver` 命名；策略函数采用 `_need_*`/`_is_*`；测试按 step 分层命名。"
+  structure_of_domain: "上游层按 管理器（upstream）/协议实现（resolver）/socket trick（resolver/tricks） 分层；选择逻辑独立于管理器放在 selector。"
+  error_handling_in_domain: "上游与 hook 异常均降级为结果级错误或日志，不中断整体请求；空结果最终由 Pipeline 回退 SERVFAIL。"
+  testing_in_domain: "unittest + IsolatedAsyncioTestCase；通过 monkeypatch dns.asyncquery 验证协议参数传递和并发语义。"
+  documentation_in_domain: "代码内中文 docstring 完整说明职责；README/AGENTS 对 A/AAAA wait_all 与其他类型 first_success 有约束描述。"
+
+related_dependencies:
+  internal:
+    - component: core/context.py::QueryContext
+      relationship_to_domain: 提供 candidates/final_answer/tags/state 容器
+      direction: bidirectional
+    - component: core/models.py::Query/ResolverResult
+      relationship_to_domain: 输入查询与输出结果统一数据结构
+      direction: bidirectional
+    - component: core/answer.py::Answer
+      relationship_to_domain: resolver 与 selector 的统一响应对象
+      direction: bidirectional
+    - component: plugins/speedcheck.py
+      relationship_to_domain: 依赖 candidates 进行最终答案选择与 IP 重写
+      direction: inbound
+    - component: plugins/https_record.py
+      relationship_to_domain: 在 HTTPS 响应路径上触发内部查询
+      direction: inbound
+    - component: config.py
+      relationship_to_domain: 动态构建 resolver 与 hook 实例
+      direction: inbound
+  external:
+    - name: dnspython
+      purpose_for_domain: 异步 DNS 查询、消息处理与资源记录对象
+    - name: httpx
+      purpose_for_domain: DoH 长连接池复用
+    - name: async-lru
+      purpose_for_domain: 避免重复外部查询/测速
+    - name: icmplib
+      purpose_for_domain: 低层 RTT 探测
+
+# 该域涉及输入合法性检查与外部网络交互，存在安全/鲁棒性相关实现。
+domain_security_considerations:
+  sensitive_areas:
+    - area: resolver hook 跳过条件
+      location: upstream/resolver_manager.py:218-231
+      concern: 非 QUERY/非 IN/非 NOERROR 结果不进入 resolver hook，避免在异常响应上执行后续改写。
+    - area: HTTPS 记录改写前置校验
+      location: plugins/https_record.py:183-214
+      concern: 仅在合法 opcode/qclass/rcode 下改写，减少协议层异常输入影响。
+    - area: 嵌套查询异常吞吐
+      location: plugins/https_record.py:338-356
+      concern: ECH 来源查询异常仅记录日志并降级，避免阻断主查询。
+  authentication_patterns_in_domain: "未涉及认证机制。"
+  authorization_patterns_in_domain: "未涉及授权机制。"
+  data_validation_in_domain: "依赖 opcode/qclass/rcode/rrtype 校验与 pydantic 参数校验约束输入。"
+
+testing_patterns:
+  framework: unittest (含 IsolatedAsyncioTestCase)
+  coverage_areas:
+    - ResolverManager 并发、tag 过滤、timeout 覆盖、hook 异常/超时隔离
+    - selector 对 A/AAAA/TXT 的选择语义
+    - 多协议 resolver 对 dns.asyncquery 参数透传
+    - HTTPS 记录插件的改写与子查询/ECH 缓存行为
+  test_organization: "按 step1~step5 分层，upstream/resolver 相关核心在 step3/step4；插件专项单测独立文件。"
+  mock_patterns:
+    - monkeypatch dns.asyncquery.* 返回伪响应
+    - FakePipeline 模拟内部 resolve 子查询
+    - SleepResolver/FakeHook 控制时序、超时与异常分支
+
+open_questions:
+  - question: HTTPS 查询是否应与 A/AAAA 一样等待全量上游，还是保持 first_success？
+    context: 当前 `_need_wait_all_results` 未纳入 HTTPS；AGENTS 中“主要查询类型 A/AAAA/HTTPS”与当前实现分支存在策略解释空间。
+  - question: first_success 路径是否允许“并发全启动后取消”带来的额外上游流量成本？
+    context: collect 在 first_success 也会先创建全部 task；高并发场景可能形成可见取消浪涌。
+  - question: TrickyDatagramSocket.recvfrom 的 5 次重试是否有明确时延预算要求？
+    context: 现实现每轮复用完整 timeout，理论最坏等待可放大。
+
+# 缺口仅描述当前调研覆盖边界，不包含实现建议。
+gaps:
+  - area: HTTPS 在 ResolverManager 分支的直接测试
+    description: `tests/test_resolver_manager_step3.py` 仅覆盖 A 与 non-A(TXT)，未直接断言 HTTPS 分支行为。
+    impact: 对 HTTPS 查询在 collect 阶段的策略回归保护较弱。
+  - area: selector 的 ads 优先规则测试
+    description: `tests/test_selector_step4.py` 未覆盖 `select_best_answer` 的 ads 标签优先路径。
+    impact: 选择器内部优先级变动时可能缺乏直接告警。
+  - area: first_success 取消路径资源回收边界
+    description: 现有测试覆盖提前返回时延，但未验证取消任务是否稳定回收 socket/连接资源。
+    impact: 在 resolver 数量较大或连接型协议占比高时，性能回归定位难度上升。
+  - area: 请求构造热路径开销基线
+    description: 无针对 `_copy_request_message` 深拷贝与 ECS 重写开销的微基准或剖析数据。
+    impact: 冗余转换优化空间难以量化比较。
+
+# 以下为基于现状代码的“可变更位点事实清单”（用于后续实现计划输入）。
+# 保持功能语义不变前提下，列出目标函数与可预期收益类型。
+change_candidates:
+  - file: upstream/resolver_manager.py
+    function: ResolverManager.collect
+    current_fact: first_success 分支仍会并发创建全部 resolver task，再在命中后取消剩余任务。
+    expected_benefit_if_optimized: "降低无效外呼与任务取消成本；在 resolver 数较多时减少事件循环负载。"
+
+  - file: upstream/resolver_manager.py
+    function: ResolverManager.collect / ResolverManager._query_one / resolver/*.resolve
+    current_fact: effective_timeout 在 manager 与 resolver 层重复计算；日志预计算也重复读取。
+    expected_benefit_if_optimized: "减少重复计算与日志路径开销，简化超时语义。"
+
+  - file: resolver/resolver.py
+    function: _copy_request_message / build_request_message
+    current_fact: 对每个 resolver 请求都执行 Query.message 的 `to_wire/from_wire` 深拷贝并进行 ECS 合并。
+    expected_benefit_if_optimized: "降低多上游并发下的对象分配与序列化开销。"
+
+  - file: upstream/selector.py
+    function: select_best_answer / _select_fastest_normal
+    current_fact: 当前实现包含候选副本构建 + ads 扫描 + 全量排序 + NOERROR 扫描。
+    expected_benefit_if_optimized: "将多次遍历与 O(n log n) 排序收敛到线性扫描路径，降低 response 阶段 CPU 开销。"
+
+  - file: resolver/tricks/udp_trick.py
+    function: TrickyDatagramSocket.recvfrom
+    current_fact: 5 次循环每次使用完整 timeout 等待；最坏时延放大。
+    expected_benefit_if_optimized: "使超时预算更可控，降低尾延迟不确定性。"
+
+  - file: plugins/https_record.py
+    function: _subqueries_indicate_cloudflare / _fetch_cached_ech_value
+    current_fact: HTTPS 处理可能触发 A/AAAA + HTTPS 额外内部查询；虽然有缓存，但首次命中仍会放大请求链路。
+    expected_benefit_if_optimized: "降低 HTTPS 响应路径的附加查询成本与尾延迟。"
+
+regression_and_test_impact:
+  impacted_existing_tests:
+    - tests/test_resolver_manager_step3.py
+    - tests/test_selector_step4.py
+    - tests/test_resolvers_multi_and_tricks.py
+    - tests/test_https_record_hook.py
+    - tests/test_speedcheck_hooks.py
+  observations:
+    - 现有断言中包含多处时延上界（如 `<0.18`、`<0.13`），任何调度或超时语义微调都可能触发阈值波动。
+    - resolver 参数透传（where/port/timeout/verify 等）由 `test_resolvers_multi_and_tricks.py` 直接锁定。
+    - HTTPS 插件子查询与缓存行为已有断言，变更其触发条件需同步调整测试期望。
+  additional_tests_to_add_in_followup:
+    - "ResolverManager: HTTPS qtype 应走哪条分支（当前实现为 first_success）的显式回归测试。"
+    - "Selector: ads 标签优先于 elapsed_ms 的显式断言测试。"
+    - "first_success 提前结束后 pending 任务取消与资源释放稳定性测试（可结合假 resolver 统计 cancel/close 调用）。"
+    - "TrickyDatagramSocket.recvfrom 超时预算上限测试（验证总等待不超预期预算）。"
+
+risks_and_compatibility:
+  - "策略兼容风险：若调整 `_need_wait_all_results` 将直接改变 non-A/HTTPS 的首包时延与候选集合规模。"
+  - "超时语义风险：合并/下沉 timeout 逻辑可能影响 `test_resolver_specific_timeout_should_override_global_timeout` 的预期。"
+  - "报文兼容风险：请求构造链路变更需确保 TXID、ECS、EDNS options 与 question rdclass 完整保真。"
+  - "行为兼容风险：selector 优化若改变同耗时候选的稳定顺序，可能影响边界用例与日志可观测性。"
+  - "插件联动风险：HTTPS 记录插件依赖 pipeline.resolve 嵌套查询；上游策略变化会放大或收敛该插件的附加开销与行为时序。"

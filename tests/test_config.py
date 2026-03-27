@@ -223,7 +223,35 @@ class TestConfig(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="mydns-tagset-order-") as td:
             base = Path(td)
             (base / "ads.txt").write_text("ads.example.com\n", encoding="utf-8")
-            with self.assertRaises(ValueError):
+            with self.assertRaisesRegex(
+                ValueError,
+                "TagSetResolverHook 必须位于 .*SpeedCheckResolverHook 之前",
+            ):
+                build_runtime_config(raw, base_dir=base)
+
+    def test_domain_rule_hook_before_cache_should_raise(self) -> None:
+        raw = {
+            "domainset": {
+                "cn": ["domains.txt"],
+            },
+            "domain_rules": {
+                "cn": "intercept",
+            },
+            "hooks": {
+                "request": [
+                    "plugins.domain_rule.DomainRuleRequestHook",
+                    "plugins.cache.CacheHook",
+                ]
+            },
+        }
+
+        with tempfile.TemporaryDirectory(prefix="mydns-domain-rule-before-cache-") as td:
+            base = Path(td)
+            (base / "domains.txt").write_text("example.cn\n", encoding="utf-8")
+            with self.assertRaisesRegex(
+                ValueError,
+                "DomainRuleRequestHook 必须位于 .*CacheHook 之后",
+            ):
                 build_runtime_config(raw, base_dir=base)
 
     def test_resolver_timeout_and_ecs_should_load_from_config(self) -> None:
@@ -515,7 +543,10 @@ class TestConfig(unittest.TestCase):
             base = Path(td)
             (base / "domains.txt").write_text("example.cn\n", encoding="utf-8")
             (base / "ips.txt").write_text("10.0.0.0/8\n", encoding="utf-8")
-            with self.assertRaises(ValueError):
+            with self.assertRaisesRegex(
+                ValueError,
+                "IPRuleResolverHook 必须位于 .*SpeedCheckResolverHook 之前",
+            ):
                 build_runtime_config(raw, base_dir=base)
 
     def test_ip_rule_should_validate_replacement_ip_tags(self) -> None:
@@ -593,7 +624,10 @@ class TestConfig(unittest.TestCase):
             base = Path(td)
             (base / "domains.txt").write_text("example.cn\n", encoding="utf-8")
             (base / "ips.txt").write_text("10.0.0.0/8\n", encoding="utf-8")
-            with self.assertRaises(ValueError):
+            with self.assertRaisesRegex(
+                ValueError,
+                "TagSetResolverHook 必须位于 .*IPRuleResolverHook 之前",
+            ):
                 build_runtime_config(raw, base_dir=base)
 
     def test_domainset_cache_file_should_prefer_cache(self) -> None:

@@ -7,6 +7,7 @@ import unittest
 import warnings
 from pathlib import Path
 
+import dns.message
 import dns.name
 import dns.opcode
 import dns.rdataclass
@@ -18,6 +19,7 @@ from core.answer import Answer
 from core.context import QueryContext
 from core.ipset import init_ipset
 from core.models import Query
+from core.response_guard import response_guard_reason
 from plugins.https_record import HttpsRecordResponseHook, _fetch_cached_ech_value
 
 
@@ -106,6 +108,31 @@ class _FakePipeline:
             for call_qname, call_qtype, _ in self.calls
             if call_qname == qname and call_qtype == int(qtype)
         )
+
+
+class TestResponseGuardHelper(unittest.TestCase):
+    def test_should_return_none_for_valid_response(self) -> None:
+        query = dns.message.make_query("example.com.", dns.rdatatype.A, dns.rdataclass.IN)
+        response = dns.message.make_response(query)
+        response.set_rcode(dns.rcode.NOERROR)
+
+        self.assertIsNone(response_guard_reason(response))
+
+    def test_should_return_custom_reason_when_not_noerror(self) -> None:
+        query = dns.message.make_query("example.com.", dns.rdatatype.A, dns.rdataclass.IN)
+        response = dns.message.make_response(query)
+        response.set_rcode(dns.rcode.SERVFAIL)
+
+        self.assertEqual(
+            response_guard_reason(response, noerror_reason="rcode_not_noerror"),
+            "rcode_not_noerror",
+        )
+
+    def test_should_return_invalid_qclass_when_question_not_in(self) -> None:
+        query = dns.message.make_query("example.com.", dns.rdatatype.A, dns.rdataclass.CH)
+        response = dns.message.make_response(query)
+
+        self.assertEqual(response_guard_reason(response), "invalid_qclass")
 
 
 class TestHttpsRecordResponseHook(unittest.IsolatedAsyncioTestCase):
@@ -285,6 +312,44 @@ class TestHttpsRecordResponseHook(unittest.IsolatedAsyncioTestCase):
 
         rdata = _first_rdata(ctx.final_answer)
         self.assertIn(svcbbase.ParamKey.ECH, rdata.params)
+        self.assertEqual(
+            pipeline.count_calls("svc.example.com.", dns.rdatatype.A),
+            1,
+        )
+        self.assertEqual(
+            pipeline.count_calls("svc.example.com.", dns.rdatatype.AAAA),
+            1,
+        )
+
+    async def test_should_dedupe_subqueries_for_multi_rdata_https_rrset(self) -> None:
+        hook = HttpsRecordResponseHook(cloudflare_tags={"cloudflare"})
+        pipeline = _FakePipeline(
+            {
+                ("svc.example.com.", int(dns.rdatatype.A)): _make_ip_answer(
+                    dns.rdatatype.A,
+                    "1.1.1.1",
+                    qname="svc.example.com.",
+                    tags={"default", "cloudflare"},
+                ),
+                ("svc.example.com.", int(dns.rdatatype.AAAA)): Answer.from_query(
+                    _make_query(dns.rdatatype.AAAA, qname="svc.example.com."),
+                    tags={"default"},
+                ),
+                ("cloudflare-ech.com.", int(dns.rdatatype.HTTPS)): _make_ech_source_answer(),
+            }
+        )
+        ctx = _make_ctx(dns.rdatatype.HTTPS)
+        ctx.final_answer = _make_https_answer('1 . alpn="h2"', '2 . alpn="h2"')
+        ctx.state["pipeline"] = pipeline
+
+        await hook.on_response(ctx)
+
+        rrset = ctx.final_answer.rrset
+        assert rrset is not None
+        self.assertEqual(len(rrset), 2)
+        for rdata in rrset:
+            self.assertIn(svcbbase.ParamKey.ECH, rdata.params)
+
         self.assertEqual(
             pipeline.count_calls("svc.example.com.", dns.rdatatype.A),
             1,

@@ -23,6 +23,7 @@ from logger import get_logger
 from plugins._config import (
     PluginConfigModel,
 )
+from plugins.utils.dns_helpers import build_ip_rrset
 from plugins.utils.speedcheck import configure, probe_ips
 from upstream.selector import select_best_answer
 
@@ -92,14 +93,16 @@ class SpeedCheckResolverHook(ResolverHook):
             return result
 
         # 只测速最终可返回的 A/AAAA rrset，不扫描整个 response.answer。
-        ips = _extract_ips(answer)
+        ips, pending = _extract_ips_and_pending(
+            answer,
+            existing_results=ctx.ip_list.results,
+            known_ips=ctx.ip_list.ips,
+        )
         if not ips:
             _log_skip_speedcheck(ctx, result, reason="no_ip_rrset")
             return result
 
         # 单个请求范围内做去重缓存，避免多个 resolver 对同一 IP 重复测速。
-        ctx.ip_list.ips.update(ips)
-        pending = [ip for ip in ips if ip not in ctx.ip_list.results]
         logger.debug(
             "测速准备 resolver=%s qname=%s qtype=%s ips=%s pending=%s cached=%s",
             result.resolver_name,
@@ -221,7 +224,7 @@ class RewriteAnswerByRTTHook(ResponseHook):
             return
 
         # `Answer` 中的 CNAME 链与最终地址 rrset 分开存储，这里只替换地址部分。
-        rewritten = _build_ip_rrset(
+        rewritten = build_ip_rrset(
             owner_name=owner_name,
             rdclass=answer.rdclass,
             qtype=answer.rdtype,
@@ -293,15 +296,19 @@ def _log_skip_rewrite(
     logger.debug(message, *args)
 
 
-def _extract_ips(
+def _extract_ips_and_pending(
     answer: Answer,
-) -> list[str]:
-    """从 Answer.rrset 提取 A/AAAA 地址，保持原顺序并去重。"""
+    *,
+    existing_results: dict[str, float | None],
+    known_ips: set[str],
+) -> tuple[list[str], list[str]]:
+    """从 Answer.rrset 提取去重 IP，并同步返回尚未测速的地址列表。"""
     rrset = answer.rrset
     if rrset is None or rrset.rdtype not in {dns.rdatatype.A, dns.rdatatype.AAAA}:
-        return []
+        return ([], [])
 
     ips: list[str] = []
+    pending: list[str] = []
     seen: set[str] = set()
     for rdata in rrset:
         ip_text = rdata.to_text()
@@ -309,19 +316,7 @@ def _extract_ips(
             continue
         seen.add(ip_text)
         ips.append(ip_text)
-    return ips
-
-
-def _build_ip_rrset(
-    owner_name: dns.name.Name,
-    rdclass: dns.rdataclass.RdataClass,
-    qtype: dns.rdatatype.RdataType,
-    ips: list[str],
-    ttl_s: int,
-) -> dns.rrset.RRset:
-    rrset = dns.rrset.RRset(owner_name, rdclass, qtype)
-    rrset.ttl = ttl_s
-    for ip in ips:
-        rdata = dns.rdata.from_text(rdclass, qtype, ip)
-        rrset.add(rdata, rrset.ttl)
-    return rrset
+        known_ips.add(ip_text)
+        if ip_text not in existing_results:
+            pending.append(ip_text)
+    return (ips, pending)

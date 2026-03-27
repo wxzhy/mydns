@@ -9,6 +9,7 @@ import unittest
 import dns.message
 import dns.name
 import dns.rcode
+import dns.rdataclass
 import dns.rdatatype
 import dns.rrset
 
@@ -18,6 +19,7 @@ from core.answer import Answer, make_answer
 from core.context import QueryContext
 from core.models import Query, ResolverResult
 from plugins.speedcheck import RewriteAnswerByRTTHook, SpeedCheckResolverHook
+from plugins.utils.dns_helpers import build_ip_rrset
 
 
 def _make_ctx(qtype: dns.rdatatype.RdataType) -> QueryContext:
@@ -40,6 +42,20 @@ def _make_a_answer(*ips: str) -> Answer:
 
 
 class TestSpeedcheckHooks(unittest.IsolatedAsyncioTestCase):
+    async def test_build_ip_rrset_helper_should_build_expected_rrset(self) -> None:
+        rrset = build_ip_rrset(
+            owner_name=dns.name.from_text("edge.example.com."),
+            rdclass=dns.rdataclass.IN,
+            qtype=dns.rdatatype.A,
+            ips=["1.1.1.1", "8.8.8.8"],
+            ttl_s=900,
+        )
+
+        self.assertEqual(rrset.name.to_text(), "edge.example.com.")
+        self.assertEqual(rrset.rdtype, dns.rdatatype.A)
+        self.assertEqual(rrset.ttl, 900)
+        self.assertEqual([rdata.to_text() for rdata in rrset], ["1.1.1.1", "8.8.8.8"])
+
     async def test_resolver_hook_should_configure_global_probe_cache_from_kwargs(self) -> None:
         original_configure = speedcheck_module.configure
         built_args: list[tuple[int, float]] = []

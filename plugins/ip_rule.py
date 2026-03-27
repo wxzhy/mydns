@@ -26,6 +26,7 @@ from plugins._config import (
     PluginConfigModel,
     dump_model_compact,
 )
+from plugins.utils.dns_helpers import build_ip_rrset
 
 
 logger = get_logger("plugins.ip_rule")
@@ -242,7 +243,7 @@ class IPRuleResolverHook(ResolverHook):
         if not rewrite_result.changed:
             return result
 
-        rewritten = _build_ip_rrset(
+        rewritten = build_ip_rrset(
             owner_name=rrset.name,
             rdclass=answer.rdclass,
             qtype=rrset.rdtype,
@@ -373,18 +374,3 @@ def _rewrite_ip_prefix(
     prefix_mask = all_bits ^ suffix_mask
     new_value = (int(target) & prefix_mask) | (int(source) & suffix_mask)
     return str(ip_address(new_value))
-
-
-def _build_ip_rrset(
-    *,
-    owner_name: dns.name.Name,
-    rdclass: dns.rdataclass.RdataClass,
-    qtype: dns.rdatatype.RdataType,
-    ips: list[str],
-    ttl_s: int,
-) -> dns.rrset.RRset:
-    rrset = dns.rrset.RRset(owner_name, rdclass, qtype)
-    rrset.ttl = ttl_s
-    for ip_text in ips:
-        rrset.add(dns.rdata.from_text(rdclass, qtype, ip_text), ttl_s)
-    return rrset

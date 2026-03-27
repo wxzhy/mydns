@@ -25,6 +25,7 @@ from plugins._config import (
     PluginConfigModel,
     dump_model_compact,
 )
+from plugins.utils.dns_helpers import build_ip_rrset
 
 
 logger = get_logger("plugins.domain_rule")
@@ -249,7 +250,7 @@ def _build_hosts_answer(ctx: QueryContext, rule: _DomainRule) -> Answer | None:
     if not records:
         return None
 
-    rrset = _build_ip_rrset(
+    rrset = build_ip_rrset(
         owner_name=ctx.query.qname,
         rdclass=dns.rdataclass.IN,
         qtype=ctx.query.qtype,
@@ -262,18 +263,3 @@ def _build_hosts_answer(ctx: QueryContext, rule: _DomainRule) -> Answer | None:
         rrsets=[rrset],
         tags=ctx.tags,
     )
-
-
-def _build_ip_rrset(
-    *,
-    owner_name: dns.name.Name,
-    rdclass: dns.rdataclass.RdataClass,
-    qtype: dns.rdatatype.RdataType,
-    ips: list[str],
-    ttl_s: int,
-) -> dns.rrset.RRset:
-    rrset = dns.rrset.RRset(owner_name, rdclass, qtype)
-    rrset.ttl = ttl_s
-    for ip_text in ips:
-        rrset.add(dns.rdata.from_text(rdclass, qtype, ip_text), ttl_s)
-    return rrset

@@ -1,0 +1,349 @@
+plan_id: plan-20260327-refactor-mydns
+objective: 在功能正常前提下重构项目，结构更清晰、代码更简洁可维护，优先使用库函数，移除冗余逻辑/判断，并优化性能。
+created_at: "2026-03-27T12:00:00+08:00"
+created_by: gem-planner
+status: completed
+research_confidence: high
+
+tldr: |
+  本计划遵循“低风险结构清理 -> 性能优化 -> 文档与测试收尾”的顺序推进。
+  关键不变量：保持 DNS 功能行为不变，严格遵守 AGENTS.md 的 hook 顺序约束，先烟测再全量回归。
+  通过波次间 contracts 与每波次回滚策略，确保可并行执行与可逆变更。
+
+open_questions:
+  - 当前阶段无阻塞性问题；若性能优化涉及行为边界，将以新增回归测试先行锁定。
+
+pre_mortem:
+  overall_risk_level: medium
+  critical_failure_modes:
+    - scenario: 结构清理误改 hook 顺序校验，导致配置通过但运行语义漂移
+      likelihood: medium
+      impact: critical
+      mitigation: 先执行并固化 test_config.py 顺序用例为烟测门禁，再做清理；不通过则立即回滚本波次
+    - scenario: ResolverManager/selector 性能优化引入 first_success 与 wait_all 语义偏差
+      likelihood: medium
+      impact: high
+      mitigation: 在优化前后对比 step3/step4 关键测试与延迟断言，任何语义不一致立即回退到前一提交
+    - scenario: HTTPS 子查询去重优化导致 ECH 注入条件误判
+      likelihood: low
+      impact: high
+      mitigation: 以 test_https_record_hook.py 为强制门禁并补充多 rdata 场景测试
+  assumptions:
+    - 以 unittest 为唯一测试框架，使用 uv run 作为标准执行入口
+    - 当前 docs/prd.yaml 不存在，本计划不与既有 PRD 冲突
+    - 重构以“可读性与可维护性优先”，不引入破坏性 API 变更
+
+implementation_specification:
+  code_structure: >-
+    先统一配置与插件层可复用纯函数/校验逻辑，再进入上游收集与选择热路径优化，最后补齐测试与文档。
+    所有行为性变更必须由测试先锁定，再实现，再复测。
+  affected_areas:
+    - config.py
+    - plugins/
+    - upstream/
+    - tests/
+    - README.md
+  component_details:
+    - component: 配置装配与语义校验层
+      responsibility: 消除重复扫描/重复装配分支，保持 hook 顺序约束与规则语义不变
+      interfaces:
+        - build_runtime_config(raw: dict) -> RuntimeConfig
+        - _validate_request_hook_order(...)
+        - _validate_resolver_hook_order(...)
+    - component: 插件公共逻辑层
+      responsibility: 提取重复 RRSet 构造与 guard/normalize 模式，减少重复代码并保持输出一致
+      interfaces:
+        - 统一的 RRSet 构造辅助函数（供 domain_rule/ip_rule/speedcheck 复用）
+        - 统一前置 guard 判定辅助函数（供 resolver/https_record 场景复用）
+    - component: 上游并发与选择层
+      responsibility: 减少热路径重复计算与不必要遍历，保持 A/AAAA(wait_all) 与 non-A(first_success) 语义
+      interfaces:
+        - ResolverManager.collect(ctx, timeout_s)
+        - select_best_answer(candidates)
+    - component: 测试与文档层
+      responsibility: 执行烟测与全量门禁，更新 README 的测试/策略描述
+      interfaces:
+        - uv run python -m unittest <smoke subset>
+        - uv run python -m unittest discover -s tests -v
+  dependencies:
+    - component: Pipeline
+      relationship: 依赖 ResolverManager.collect 结果并串联 hooks
+    - component: HttpsRecordResponseHook
+      relationship: 依赖 Pipeline.resolve 子查询结果与上游策略稳定性
+    - component: test_config/test_resolver_manager_step3/test_selector_step4
+      relationship: 作为语义不变量守护
+  integration_points:
+    - 配置装配入口：config.build_runtime_config
+    - 上游并发入口：upstream.resolver_manager.ResolverManager.collect
+    - 选择策略入口：upstream.selector.select_best_answer
+    - 性能敏感插件：plugins/speedcheck.py 与 plugins/https_record.py
+
+contracts:
+  - from_task: T01
+    to_task: T02
+    interface: 烟测基线报告（hook 顺序、step2/3/4 核心用例、关键耗时样本）
+    format: markdown checklist + test result summary
+  - from_task: T02
+    to_task: T03
+    interface: 配置层不变量清单（hook 顺序约束、规则语义、默认装配行为）
+    format: yaml invariants
+  - from_task: T03
+    to_task: T04
+    interface: 公共辅助函数接口（RRSet builder / guard helper）
+    format: python function signatures + migration mapping
+  - from_task: T04
+    to_task: T05
+    interface: 上游热路径优化边界（A/AAAA wait_all, non-A first_success, resolver hook 跳过条件）
+    format: behavior matrix table
+  - from_task: T05
+    to_task: T06
+    interface: 性能优化结果与回归影响面
+    format: before/after metrics note + affected tests list
+  - from_task: T06
+    to_task: T07
+    interface: 文档变更清单与测试门禁结果
+    format: checklist
+
+wave_rollbacks:
+  - wave: 1
+    rollback_strategy: 任何烟测失败，回滚本波次全部结构改动，仅保留无行为影响的注释/命名调整
+  - wave: 2
+    rollback_strategy: 若公共函数抽取导致任一插件输出不一致，回滚抽取提交并恢复原函数实现
+  - wave: 3
+    rollback_strategy: 若 step3/step4/https 语义回归或性能无改善，回滚性能优化提交，保留结构清理成果
+  - wave: 4
+    rollback_strategy: 若全量回归失败，回滚文档与测试新增提交到上一稳定点并重新切分补丁
+
+tasks:
+  - id: T01
+    title: 建立重构门禁与烟测基线
+    wave: 1
+    status: completed
+    dependencies: []
+    agent: gem-reviewer
+    definition: |
+      固化“先烟测后改动”的门禁流程，优先执行与重构范围强相关的 smoke 测试：
+      - tests/test_config.py（hook 顺序与语义约束）
+      - tests/test_pipeline_step2.py（流水线阶段顺序）
+      - tests/test_resolver_manager_step3.py（wait_all/first_success）
+      - tests/test_selector_step4.py（选择策略）
+      - tests/test_https_record_hook.py（HTTPS/ECH）
+      输出可对照的基线结果与已知 flaky 记录（如有）。
+    verification:
+      - 烟测全部通过并形成基线记录
+      - 明确标注 hook 顺序约束用例均为通过状态
+      - 记录至少一组可比较的时延样本（来自 step3/性能相关测试）
+    priority: high
+    estimated_effort: small
+    estimated_files: 2
+    estimated_lines: 80
+    failure_modes:
+      - scenario: 烟测本身存在不稳定导致误判
+        likelihood: medium
+        impact: medium
+        mitigation: 连续执行两次烟测并以稳定交集结果作为基线
+
+  - id: T02
+    title: 配置装配链低风险结构清理（不改行为）
+    wave: 1
+    status: completed
+    dependencies: [T01]
+    agent: gem-implementer
+    definition: |
+      在 config/main 相关链路内清理重复与冗余判断，保持输出行为与异常语义不变：
+      - 优化 RuntimeSemanticConfigModel 中重复线性扫描
+      - 收敛弱可达/重复默认装配分支（含 app.py 与 config.py 的重复定义评估）
+      - 保持 AGENTS.md 规定的 hook 顺序校验逻辑不变且更易读
+    verification:
+      - test_config.py 全量通过
+      - step2/step3 相关用例通过，且 hook 顺序错误提示语义不退化
+      - 代码审查确认无对外配置字段变化
+    priority: high
+    estimated_effort: medium
+    estimated_files: 3
+    estimated_lines: 260
+    failure_modes:
+      - scenario: 结构清理误触发默认行为变化
+        likelihood: medium
+        impact: high
+        mitigation: 以 T01 基线对比差异；发现行为偏差立即回滚本任务提交
+    tech_stack:
+      - Python 3.13
+      - pydantic v2
+    test_coverage: tests/test_config.py + tests/test_pipeline_step2.py
+
+  - id: T03
+    title: 插件层重复逻辑提取为公共辅助函数
+    wave: 2
+    status: completed
+    dependencies: [T02]
+    agent: gem-implementer
+    definition: |
+      先做低风险“去冗余不改语义”：
+      - 抽取并复用 `domain_rule/ip_rule/speedcheck` 中重复 RRSet 构造
+      - 收敛 `resolver_manager` 与 `https_record` 的相似前置 guard 判定
+      - 保持插件 hook 执行顺序与返回结果结构完全一致
+    verification:
+      - tests/test_domainset_ipset_core.py 通过
+      - tests/test_speedcheck_hooks.py 与 tests/test_https_record_hook.py 通过
+      - 关键快照断言（rrset/cname/rcode）一致
+    priority: medium
+    estimated_effort: medium
+    estimated_files: 3
+    estimated_lines: 320
+    failure_modes:
+      - scenario: 公共函数抽取造成插件边界行为细微差异
+        likelihood: medium
+        impact: high
+        mitigation: 对比抽取前后 rrset 构造输出；不一致则回滚并改为局部重复保留
+    tech_stack:
+      - Python 3.13
+      - dnspython
+    test_coverage: tests/test_domainset_ipset_core.py + tests/test_speedcheck_hooks.py + tests/test_https_record_hook.py
+
+  - id: T04
+    title: 上游收集热路径优化（ResolverManager）
+    wave: 3
+    status: completed
+    dependencies: [T03]
+    agent: gem-implementer
+    definition: |
+      在不改变策略语义前提下优化 collect 热路径：
+      - 减少 timeout/effective_timeout 重复计算
+      - 优化任务完成后清理与 early break 逻辑
+      - 保持 A/AAAA wait_all、non-A first_success（包含 HTTPS）不变
+    verification:
+      - tests/test_resolver_manager_step3.py 全量通过
+      - tests/test_resolvers_multi_and_tricks.py 相关项通过
+      - 与 T01 基线相比，关键并发测试耗时不退化
+    priority: high
+    estimated_effort: medium
+    estimated_files: 2
+    estimated_lines: 240
+    failure_modes:
+      - scenario: early break 优化误取消有效结果或改变候选集
+        likelihood: medium
+        impact: high
+        mitigation: 增加候选集数量与来源断言；失败即回滚本任务
+    tech_stack:
+      - Python 3.13
+      - asyncio
+    test_coverage: tests/test_resolver_manager_step3.py + tests/test_resolvers_multi_and_tricks.py
+
+  - id: T05
+    title: 选择器与 HTTPS/测速路径性能优化
+    wave: 3
+    status: completed
+    dependencies: [T04]
+    agent: gem-implementer
+    definition: |
+      聚焦高频/放大路径：
+      - 减少 selector 不必要排序/遍历
+      - 优化 speedcheck 提取与重复判定
+      - 对 https_record 多 rdata 场景引入子查询去重/复用，避免重复内部查询
+      以上优化均需保持现有外部可观察行为不变。
+    verification:
+      - tests/test_selector_step4.py 通过
+      - tests/test_speedcheck_utils.py 与 tests/test_speedcheck_hooks.py 通过
+      - tests/test_https_record_hook.py 通过（含新增多 rdata 去重回归）
+    priority: high
+    estimated_effort: large
+    estimated_files: 3
+    estimated_lines: 420
+    failure_modes:
+      - scenario: 去重策略过度导致 ECH 注入漏判
+        likelihood: medium
+        impact: critical
+        mitigation: 先补多 rdata 反例测试，再改实现；任一失败立即回滚
+    tech_stack:
+      - Python 3.13
+      - async-lru
+      - dnspython
+    test_coverage: tests/test_selector_step4.py + tests/test_speedcheck_*.py + tests/test_https_record_hook.py
+
+  - id: T06
+    title: 补齐回归测试与烟测脚本化
+    wave: 4
+    status: completed
+    dependencies: [T05]
+    agent: gem-reviewer
+    definition: |
+      将本次重构新增/调整的边界行为写入测试，形成稳定烟测集合：
+      - 补充 HTTPS 多 rdata 去重与子查询次数断言
+      - 补充结构抽取后公共函数一致性断言
+      - 维护最小烟测集以支持后续快速回归
+    verification:
+      - 新增测试在当前分支可稳定重复通过
+      - 烟测集合覆盖 hook 顺序、上游策略、HTTPS、speedcheck 主链
+      - 失败时可快速定位到对应波次
+    priority: medium
+    estimated_effort: medium
+    estimated_files: 3
+    estimated_lines: 260
+    failure_modes:
+      - scenario: 测试覆盖不足导致隐藏回归漏检
+        likelihood: medium
+        impact: high
+        mitigation: 用变更影响面反推测试矩阵，要求每个优化点至少一个正反用例
+    requires_review: true
+    review_depth: standard
+    security_sensitive: false
+
+  - id: T07
+    title: 执行最终全量门禁并输出验收结论
+    wave: 4
+    status: completed
+    dependencies: [T06]
+    agent: gem-reviewer
+    definition: |
+      执行最终全量回归门禁：
+      - 优先烟测（若失败立刻停止）
+      - 通过后执行 `uv run python -m unittest discover -s tests -v`
+      汇总通过率、失败清单与性能对比结论。
+    verification:
+      - 全量测试通过
+      - 与 T01 对比无语义退化
+      - 形成可审计的验收摘要
+    priority: high
+    estimated_effort: small
+    estimated_files: 1
+    estimated_lines: 60
+    failure_modes:
+      - scenario: 全量门禁暴露跨模块回归
+        likelihood: medium
+        impact: high
+        mitigation: 按失败模块回溯到对应波次合同，选择性回滚并重跑
+    requires_review: true
+    review_depth: full
+    security_sensitive: false
+
+  - id: T08
+    title: 文档收尾与约定同步（README/计划状态）
+    wave: 4
+    status: completed
+    dependencies: [T07]
+    agent: gem-documentation-writer
+    definition: |
+      按 AGENTS.md 要求同步文档：
+      - 若涉及流水线策略/配置字段/测试命令描述变化，更新 README
+      - 在计划文档中标记完成状态与关键风险处置结果
+      - 记录“先烟测、后全量”的门禁流程
+    verification:
+      - README 与实现/测试命令一致
+      - 关键约束（hook 顺序、上游策略）在文档中可追溯
+      - 文档评审通过
+    priority: medium
+    estimated_effort: small
+    estimated_files: 2
+    estimated_lines: 120
+    failure_modes:
+      - scenario: 文档滞后于实现导致后续维护误导
+        likelihood: medium
+        impact: medium
+        mitigation: 将文档更新作为 T07 通过后的阻塞步骤，不满足不得标记完成
+    task_type: update
+    audience: developers
+    coverage_matrix:
+      - hook 顺序约束（DomainRule/Cache, TagSet/IPRule/SpeedCheck）
+      - 上游策略（A/AAAA wait_all, non-A first_success）
+      - 测试门禁流程（烟测优先 + 最终全量）

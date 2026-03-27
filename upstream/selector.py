@@ -48,11 +48,27 @@ def select_best_answer(ctx: QueryContext) -> Answer:
 
 def _select_fastest_normal(candidates: list[ResolverResult]) -> Answer:
     """返回最快 NOERROR；若不存在则回退最快响应。"""
-    ordered = sorted(candidates, key=_candidate_speed_key)
-    for item in ordered:
-        if item.answer.response.rcode() == dns.rcode.NOERROR:
-            return item.answer
-    return ordered[0].answer
+    fastest_noerror: ResolverResult | None = None
+    fastest_noerror_key = inf
+    fastest_any: ResolverResult | None = None
+    fastest_any_key = inf
+
+    for item in candidates:
+        elapsed_ms = item.elapsed_ms
+        item_key = inf if elapsed_ms is None else elapsed_ms
+        if item_key < fastest_any_key:
+            fastest_any = item
+            fastest_any_key = item_key
+        if (
+            item.answer.response.rcode() == dns.rcode.NOERROR
+            and item_key < fastest_noerror_key
+        ):
+            fastest_noerror = item
+            fastest_noerror_key = item_key
+
+    selected = fastest_noerror or fastest_any
+    assert selected is not None
+    return selected.answer
 
 
 def _select_tagged_answer(

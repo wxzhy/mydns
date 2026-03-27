@@ -50,6 +50,16 @@ class _SleepResolver(Resolver):
         return Answer.from_query(query, rcode=dns.rcode.NOERROR)
 
 
+class _CountTimeoutResolver(_SleepResolver):
+    def __init__(self, name: str, delay_s: float) -> None:
+        super().__init__(name=name, delay_s=delay_s)
+        self.effective_timeout_calls = 0
+
+    def effective_timeout(self, timeout_s: float) -> float:
+        self.effective_timeout_calls += 1
+        return super().effective_timeout(timeout_s)
+
+
 class _RecordHook(ResolverHook):
     async def on_resolver_result(
         self,
@@ -331,6 +341,44 @@ class TestResolverManagerStep3(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("slow-good", names)
         self.assertIsNotNone(ctx.final_answer)
         self.assertEqual(ctx.final_answer.response.rcode(), dns.rcode.NOERROR)
+
+    async def test_https_should_use_first_success_strategy(self) -> None:
+        ctx = self._new_ctx(dns.rdatatype.HTTPS)
+        manager = ResolverManager(
+            resolvers=[
+                _SleepResolver(
+                    "fast-good",
+                    delay_s=0.03,
+                    answer=Answer.from_query(ctx.query, rcode=dns.rcode.NOERROR),
+                ),
+                _SleepResolver(
+                    "slow-good",
+                    delay_s=0.20,
+                    answer=Answer.from_query(ctx.query, rcode=dns.rcode.NOERROR),
+                ),
+            ]
+        )
+
+        start = time.perf_counter()
+        await manager.collect(ctx, timeout_s=0.5)
+        duration = time.perf_counter() - start
+
+        names = [x.resolver_name for x in ctx.candidates]
+        self.assertLess(duration, 0.15)
+        self.assertIn("fast-good", names)
+        self.assertNotIn("slow-good", names)
+        self.assertIsNotNone(ctx.final_answer)
+        self.assertEqual(ctx.final_answer.response.rcode(), dns.rcode.NOERROR)
+
+    async def test_effective_timeout_should_be_computed_once_per_resolver(self) -> None:
+        r1 = _CountTimeoutResolver("r1", delay_s=0.01)
+        r2 = _CountTimeoutResolver("r2", delay_s=0.01)
+        manager = ResolverManager(resolvers=[r1, r2])
+
+        await manager.collect(self.ctx, timeout_s=0.2)
+
+        self.assertEqual(r1.effective_timeout_calls, 1)
+        self.assertEqual(r2.effective_timeout_calls, 1)
 
     async def test_a_waits_all_resolver_and_hook(self) -> None:
         ctx = self._new_ctx(dns.rdatatype.A)

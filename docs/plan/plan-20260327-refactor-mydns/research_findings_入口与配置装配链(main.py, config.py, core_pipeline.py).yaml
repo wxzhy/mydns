@@ -1,0 +1,529 @@
+plan_id: plan-20260327-refactor-mydns
+objective: 全项目重构与性能优化（功能不变）
+focus_area: 入口与配置装配链(main.py, config.py, core/pipeline.py)
+created_at: "2026-03-27"
+created_by: gem-researcher
+status: completed
+
+tldr: |
+  - 入口主链路为 `main.main -> load_runtime_config -> build_runtime_config -> Pipeline.process`，服务层由 `server/udp_server.py` 与 `server/tcp_server.py` 调用 `Pipeline.process` 完成请求处理。
+  - 配置装配的职责主要集中在 `config.py`：语法解析（Pydantic）、语义校验（hook 顺序与 tag 约束）、规则注入（top-level domain/ip rules）、对象构建（resolver/hook 实例化）。
+  - 可见重复/冗余点包括：`app.py` 与 `config.py` 默认装配重复、`main.py` 的 `build_pipeline` 回退分支弱可达、`RuntimeSemanticConfigModel._validate_runtime` 多次线性扫描 hooks、`ResolverManager.collect` 重复计算 timeout。
+  - 热路径性能风险主要位于 `ResolverManager.collect`（并发任务 + hook 串行处理）、日志参数预计算（`sorted(ctx.tags)`）、以及高并发 UDP 场景下 `_DNSDatagramProtocol` 的无背压 task 增长。
+  - 当前测试覆盖与该域强相关文件充足（`test_config.py`、`test_pipeline_step2.py`、`test_resolver_manager_step3.py`、`test_udp_integration_step5.py`、`test_tcp_integration_step5.py`），可支撑低风险分阶段重构。
+
+research_metadata:
+  methodology: "三轮混合检索：semantic_search（尝试）、grep_search（符号定位）、read_file（实现细读）、code usages（依赖/调用关系发现）"
+  scope: "聚焦入口与配置装配链；覆盖 main/config/pipeline 及其直接运行链路（server/wire/resolver_manager）与相关测试"
+  confidence: high
+  coverage: 90
+
+files_analyzed:
+  - file: main.py
+    path: c:/Users/Huawei/Documents/Dev/mydns/main.py
+    purpose: 程序入口与服务启动编排
+    key_elements:
+      - element: parse_args
+        type: function
+        location: main.py:19
+        description: 解析 `--config --host --port` 参数，`--config` 默认值指向示例配置。
+      - element: _run
+        type: function
+        location: main.py:28
+        description: 启动 UDP/TCP server 并 `serve_forever`，负责优雅停止。
+      - element: main
+        type: function
+        location: main.py:64
+        description: 读取配置并构建 pipeline，执行 asyncio 主循环。
+    language: python
+    lines: 103
+
+  - file: config.py
+    path: c:/Users/Huawei/Documents/Dev/mydns/config.py
+    purpose: 运行时配置解析、语义校验、对象装配
+    key_elements:
+      - element: load_runtime_config
+        type: function
+        location: config.py:482
+        description: 从 YAML 文件读取原始配置并委托 `build_runtime_config`。
+      - element: build_runtime_config
+        type: function
+        location: config.py:493
+        description: 执行模型解析、集合初始化、语义校验、规则注入与 Pipeline 构建。
+      - element: RuntimeSemanticConfigModel._validate_runtime
+        type: function
+        location: config.py:386
+        description: 校验 hook 顺序、domain/ip 规则与 tag 关系。
+      - element: _build_hook_objects
+        type: function
+        location: config.py:549
+        description: 动态加载 hook class 并实例化。
+      - element: _load_class
+        type: function
+        location: config.py:565
+        description: 通过 `import_module + getattr` 动态装载 class 并校验基类。
+      - element: _validate_request_hook_order
+        type: function
+        location: config.py:658
+        description: 约束 `DomainRuleRequestHook` 位于 `CacheHook` 之后。
+      - element: _validate_resolver_hook_order
+        type: function
+        location: config.py:673
+        description: 约束 TagSet/IPRule 与 SpeedCheck 的先后关系。
+    language: python
+    lines: 758
+
+  - file: core/pipeline.py
+    path: c:/Users/Huawei/Documents/Dev/mydns/core/pipeline.py
+    purpose: DNS 三阶段流水线编排
+    key_elements:
+      - element: Pipeline.process
+        type: function
+        location: core/pipeline.py:41
+        description: 标准入口，调用 `_process_with_timeout`。
+      - element: Pipeline.resolve
+        type: function
+        location: core/pipeline.py:45
+        description: 供内部 resolver 风格调用，构造 QueryContext。
+      - element: Pipeline._process_with_timeout
+        type: function
+        location: core/pipeline.py:55
+        description: request hooks -> upstream collect -> response hooks -> fallback。
+      - element: Pipeline._fallback_answer
+        type: function
+        location: core/pipeline.py:105
+        description: 无最终答案时生成 SERVFAIL。
+    language: python
+    lines: 119
+
+  - file: upstream/resolver_manager.py
+    path: c:/Users/Huawei/Documents/Dev/mydns/upstream/resolver_manager.py
+    purpose: 上游并发调度、结果筛选与 resolver hook 调用
+    key_elements:
+      - element: ResolverManager.collect
+        type: function
+        location: upstream/resolver_manager.py:36
+        description: 按 tag 过滤 resolver，并发查询，按策略保留候选结果。
+      - element: ResolverManager._query_one
+        type: function
+        location: upstream/resolver_manager.py:104
+        description: 单 resolver 查询、超时控制、耗时统计。
+      - element: ResolverManager._run_resolver_hooks
+        type: function
+        location: upstream/resolver_manager.py:147
+        description: 对单结果执行 resolver hooks（含超时保护）。
+      - element: _need_wait_all_results
+        type: function
+        location: upstream/resolver_manager.py:207
+        description: A/AAAA 使用 wait_all，其他类型使用 first_success。
+    language: python
+    lines: 230
+
+  - file: server/udp_server.py
+    path: c:/Users/Huawei/Documents/Dev/mydns/server/udp_server.py
+    purpose: UDP 报文接入 pipeline
+    key_elements:
+      - element: _DNSDatagramProtocol.datagram_received
+        type: function
+        location: server/udp_server.py:31
+        description: 每个 datagram 创建异步任务处理。
+      - element: UDPDNSServer._process_datagram
+        type: function
+        location: server/udp_server.py:87
+        description: parse_query_context -> pipeline.process -> build_response_wire。
+    language: python
+    lines: 116
+
+  - file: server/tcp_server.py
+    path: c:/Users/Huawei/Documents/Dev/mydns/server/tcp_server.py
+    purpose: TCP 报文接入 pipeline
+    key_elements:
+      - element: TCPDNSServer._handle_client
+        type: function
+        location: server/tcp_server.py:67
+        description: 循环读取长度前缀报文并返回 DNS 响应。
+      - element: TCPDNSServer._process_request_wire
+        type: function
+        location: server/tcp_server.py:106
+        description: parse_query_context -> pipeline.process -> build_response_wire。
+    language: python
+    lines: 145
+
+  - file: core/wire.py
+    path: c:/Users/Huawei/Documents/Dev/mydns/core/wire.py
+    purpose: DNS wire 与 QueryContext/Answer 转换
+    key_elements:
+      - element: parse_query_context
+        type: function
+        location: core/wire.py:23
+        description: 报文解析、opcode/qclass 校验、提取 ECS 并构建 QueryContext。
+      - element: _validate_request_message
+        type: function
+        location: core/wire.py:80
+        description: 强制仅接受 QUERY + IN。
+      - element: build_response_wire
+        type: function
+        location: core/wire.py:45
+        description: 以 request message 为模板封装响应。
+    language: python
+    lines: 91
+
+  - file: tests/test_config.py
+    path: c:/Users/Huawei/Documents/Dev/mydns/tests/test_config.py
+    purpose: 配置解析、hook 顺序与规则语义校验回归
+    key_elements:
+      - element: test_load_runtime_config_defaults
+        type: function
+        location: tests/test_config.py:26
+        description: 验证默认 server/pipeline/hook/resolver 装配。
+      - element: test_domain_rule_hook_should_load_after_cache_when_declared_manually
+        type: function
+        location: tests/test_config.py:351
+        description: 验证 request hook 顺序约束。
+      - element: test_ip_rule_hook_should_load_after_tagset_and_before_speedcheck
+        type: function
+        location: tests/test_config.py:385
+        description: 验证 resolver hook 顺序约束。
+    language: python
+    lines: 620
+
+  - file: tests/test_pipeline_step2.py
+    path: c:/Users/Huawei/Documents/Dev/mydns/tests/test_pipeline_step2.py
+    purpose: 流水线三阶段编排回归
+    key_elements:
+      - element: test_pipeline_order
+        type: function
+        location: tests/test_pipeline_step2.py:71
+        description: 验证 request/upstream/response 执行顺序。
+      - element: test_request_short_circuit
+        type: function
+        location: tests/test_pipeline_step2.py:85
+        description: 验证 request 短路不访问 upstream。
+    language: python
+    lines: 130
+
+  - file: tests/test_resolver_manager_step3.py
+    path: c:/Users/Huawei/Documents/Dev/mydns/tests/test_resolver_manager_step3.py
+    purpose: 上游并发、超时、hook 行为与策略回归
+    key_elements:
+      - element: test_concurrent_collect
+        type: function
+        location: tests/test_resolver_manager_step3.py:145
+        description: 验证并发收敛时间。
+      - element: test_resolver_specific_timeout_should_override_global_timeout
+        type: function
+        location: tests/test_resolver_manager_step3.py:176
+        description: 验证单 resolver timeout 覆盖全局 timeout。
+    language: python
+    lines: 430
+
+patterns_found:
+  - category: architecture
+    pattern: 入口-配置-流水线分层
+    description: `main.py` 负责启动，`config.py` 负责装配，`core/pipeline.py` 负责运行时编排。
+    examples:
+      - file: main.py
+        location: main.py:73
+        snippet: "runtime = load_runtime_config(args.config)"
+      - file: config.py
+        location: config.py:533
+        snippet: "pipeline = Pipeline(...)"
+      - file: core/pipeline.py
+        location: core/pipeline.py:55
+        snippet: "_process_with_timeout: request -> upstream -> response"
+    prevalence: common
+
+  - category: structure
+    pattern: 配置模型 + 语义二阶段校验
+    description: 先由 Pydantic 模型校验结构，再进行 hook 顺序与 tag 引用语义校验。
+    examples:
+      - file: config.py
+        location: config.py:499
+        snippet: "parsed = RawRuntimeConfigModel.model_validate(raw)"
+      - file: config.py
+        location: config.py:512
+        snippet: "RuntimeSemanticConfigModel.model_validate({...})"
+    prevalence: common
+
+  - category: architecture
+    pattern: 动态类加载装配
+    description: hook/resolver 通过类路径字符串动态加载并实例化。
+    examples:
+      - file: config.py
+        location: config.py:565
+        snippet: "module = import_module(module_name)"
+      - file: config.py
+        location: config.py:549
+        snippet: "_build_hook_objects(...)"
+    prevalence: common
+
+  - category: structure
+    pattern: 默认装配重复定义
+    description: 默认 resolver/hook 列表在 `config.py` 与 `app.py` 双份维护。
+    examples:
+      - file: config.py
+        location: config.py:85
+        snippet: "_DEFAULT_REQUEST_HOOKS / _DEFAULT_RESOLVER_HOOKS / _DEFAULT_RESPONSE_HOOKS / _DEFAULT_RESOLVERS"
+      - file: app.py
+        location: app.py:15
+        snippet: "def build_pipeline() -> Pipeline: ..."
+    prevalence: occasional
+
+  - category: performance
+    pattern: 多次线性扫描与深拷贝
+    description: 针对 hooks/specs 的重复遍历与 `model_copy(deep=True)` 在配置构建阶段较频繁。
+    examples:
+      - file: config.py
+        location: config.py:396
+        snippet: "domain_rule_hooks = _find_hooks(...)"
+      - file: config.py
+        location: config.py:417
+        snippet: "for hook in _find_hooks(self.request_hooks, ...)"
+      - file: config.py
+        location: config.py:586
+        snippet: "return [spec.model_copy(deep=True) for spec in specs]"
+    prevalence: common
+
+  - category: performance
+    pattern: 并发任务手动管理
+    description: `ResolverManager.collect` 使用 `create_task + as_completed + cancel` 管理任务生命周期。
+    examples:
+      - file: upstream/resolver_manager.py
+        location: upstream/resolver_manager.py:63
+        snippet: "tasks = [asyncio.create_task(...)]"
+      - file: upstream/resolver_manager.py
+        location: upstream/resolver_manager.py:67
+        snippet: "for completed in asyncio.as_completed(tasks):"
+    prevalence: common
+
+related_architecture:
+  components_relevant_to_domain:
+    - component: main entry
+      responsibility: 解析参数并启动 server
+      location: main.py
+      relationship_to_domain: domain owns this
+    - component: runtime config builder
+      responsibility: 配置解析、语义校验、对象装配
+      location: config.py
+      relationship_to_domain: domain owns this
+    - component: pipeline orchestrator
+      responsibility: 三阶段执行与 fallback
+      location: core/pipeline.py
+      relationship_to_domain: domain owns this
+    - component: upstream manager
+      responsibility: 上游并发调度与候选结果收集
+      location: upstream/resolver_manager.py
+      relationship_to_domain: domain depends on this
+    - component: transport servers
+      responsibility: TCP/UDP 报文读写与 pipeline 调用
+      location: server/
+      relationship_to_domain: this uses domain outputs
+  interfaces_used_by_domain:
+    - interface: RequestHook/ResolverHook/ResponseHook
+      location: core/hooks.py
+      usage_pattern: Pipeline/ResolverManager 在各阶段回调插件。
+    - interface: Resolver
+      location: resolver/resolver.py
+      usage_pattern: ResolverManager 并发调用 `resolve()`。
+  data_flow_involving_domain: |
+    UDP/TCP 请求 -> `core.wire.parse_query_context` -> `Pipeline.process`
+    -> request hooks -> `ResolverManager.collect` 并发上游 -> response hooks
+    -> `core.wire.build_response_wire` -> UDP/TCP 返回。
+  key_relationships_to_domain:
+    - from: main.main
+      to: config.load_runtime_config
+      relationship: calls
+    - from: config.build_runtime_config
+      to: core.pipeline.Pipeline
+      relationship: composes
+    - from: core.pipeline.Pipeline._run_upstream
+      to: upstream.resolver_manager.ResolverManager.collect
+      relationship: calls
+    - from: server.udp_server.UDPDNSServer._process_datagram
+      to: core.pipeline.Pipeline.process
+      relationship: calls
+    - from: server.tcp_server.TCPDNSServer._process_request_wire
+      to: core.pipeline.Pipeline.process
+      relationship: calls
+
+related_technology_stack:
+  languages_used_in_domain:
+    - Python 3.13+
+  frameworks_used_in_domain: []
+  libraries_used_in_domain:
+    - name: pydantic
+      purpose_in_domain: 配置模型解析与校验
+    - name: PyYAML
+      purpose_in_domain: YAML 配置读取
+    - name: dnspython
+      purpose_in_domain: DNS 报文解析/构建与 RCODE/QTYPE 常量
+    - name: asyncio
+      purpose_in_domain: 服务并发与上游查询并发
+  external_apis_used_in_domain: []
+
+related_conventions:
+  naming_patterns_in_domain: "以 `_validate_*` 表示语义校验；`effective_*` 表示默认值合并后的规范化规格；`_apply_top_level_*` 表示顶层规则注入。"
+  structure_of_domain: "main 只做启动；config 做装配；pipeline 做请求时编排；resolver_manager 专职上游并发。"
+  error_handling_in_domain: "配置阶段使用 ValueError 明确报错；运行时 server 层将解析/处理异常映射为 REFUSED/FORMERR/SERVFAIL。"
+  testing_in_domain: "按 step 分层测试，配置与流水线关键语义由独立测试覆盖。"
+  documentation_in_domain: "AGENTS.md 明确要求先理解入口/配置/pipeline/上游再修改，并强调 hook 顺序约束。"
+
+related_dependencies:
+  internal:
+    - component: app.build_pipeline
+      relationship_to_domain: 提供 main 的 fallback pipeline 构造，与 config 默认构造重复
+      direction: bidirectional
+    - component: core.wire
+      relationship_to_domain: 负责请求合法性校验与上下文构建，入口处理依赖它
+      direction: outbound
+    - component: server.udp_server / server.tcp_server
+      relationship_to_domain: 调用 pipeline 处理请求
+      direction: inbound
+    - component: tests/test_config.py
+      relationship_to_domain: 覆盖配置装配与校验语义
+      direction: inbound
+    - component: tests/test_pipeline_step2.py
+      relationship_to_domain: 覆盖 pipeline 三阶段行为
+      direction: inbound
+    - component: tests/test_resolver_manager_step3.py
+      relationship_to_domain: 覆盖上游并发与 hook 语义
+      direction: inbound
+  external:
+    - name: pydantic
+      purpose_for_domain: 配置模型、字段校验、前后置验证
+    - name: dnspython
+      purpose_for_domain: DNS message/rcode/rdatatype 处理
+    - name: pyyaml
+      purpose_for_domain: 配置文件解析
+
+domain_security_considerations:
+  sensitive_areas:
+    - area: 请求有效性校验
+      location: core/wire.py:80
+      concern: 非 QUERY 或非 IN 会被拒绝，防止不支持请求进入流水线。
+  authentication_patterns_in_domain: "未涉及身份认证。"
+  authorization_patterns_in_domain: "未涉及授权控制。"
+  data_validation_in_domain: "配置数据由 Pydantic 校验；DNS 请求由 wire 层校验 opcode/qclass/question。"
+
+testing_patterns:
+  framework: unittest (IsolatedAsyncioTestCase)
+  coverage_areas:
+    - 配置默认值、类型校验、hook 顺序校验
+    - pipeline 顺序、短路、fallback
+    - resolver manager 并发、超时、hook 跳过逻辑
+    - UDP/TCP 集成请求路径
+  test_organization: "step1~step5 分层 + 主题测试文件"
+  mock_patterns:
+    - "自定义 _SleepResolver/_TrackResolver 等假实现模拟并发与错误"
+    - "临时目录写配置文件验证 load_runtime_config"
+
+refactor_steps_low_risk:
+  - step: 1
+    change: "统一默认装配来源，消除双份默认定义"
+    files:
+      - app.py
+      - config.py
+      - main.py
+    concrete_action: |
+      保留 `config.py` 的 `_DEFAULT_*` 作为唯一事实来源；
+      将 `main.py` 中 fallback 分支改为调用 `build_runtime_config({})` 或移除 fallback（按产品决策）；
+      使 `app.py.build_pipeline` 仅作为薄包装（或删除）。
+    expected_effect: "降低默认配置维护分叉风险，减少冗余代码。"
+
+  - step: 2
+    change: "减少配置阶段重复遍历/深拷贝"
+    files:
+      - config.py
+    concrete_action: |
+      在 `RuntimeSemanticConfigModel._validate_runtime` 内一次性预分组 hooks（按 class_path）；
+      复用分组结果替代多次 `_find_hooks`；
+      `_apply_top_level_domain_rules/_apply_top_level_ip_rules` 仅在命中目标 hook 时复制对象，未命中直接复用原 spec（或浅复制）。
+    expected_effect: "降低配置装配 CPU/内存开销，保持行为不变。"
+
+  - step: 3
+    change: "优化动态类加载热点"
+    files:
+      - config.py
+    concrete_action: |
+      给 `_load_class(class_path, expected_base)` 增加缓存层（例如基于 class_path + expected_base 的缓存）；
+      保持子类校验不变。
+    expected_effect: "减少重复 import/getattr 路径成本，简化频繁构建时开销。"
+
+  - step: 4
+    change: "优化 ResolverManager 内部重复计算与日志开销"
+    files:
+      - upstream/resolver_manager.py
+      - core/pipeline.py
+    concrete_action: |
+      `collect()` 中避免对同一 resolver 的 timeout 重复计算；
+      对 `sorted(ctx.tags)` 等调试参数在 debug 开启时再计算。
+    expected_effect: "减小请求热路径上的微开销。"
+
+  - step: 5
+    change: "并发任务管理收敛"
+    files:
+      - upstream/resolver_manager.py
+    concrete_action: |
+      保持当前行为语义不变前提下，收敛 `create_task/as_completed/cancel` 代码路径（可逐步引入更结构化任务管理）；
+      先以重构函数提取为主，后续再评估机制替换。
+    expected_effect: "提高可维护性并降低取消时序相关风险。"
+
+test_impact_and_regression:
+  directly_affected_tests:
+    - tests/test_config.py
+    - tests/test_pipeline_step2.py
+    - tests/test_resolver_manager_step3.py
+    - tests/test_udp_integration_step5.py
+    - tests/test_tcp_integration_step5.py
+    - tests/test_cache_hooks.py
+  regression_recommendation:
+    - phase: "配置装配改动后"
+      run: "uv run python -m unittest tests.test_config -v"
+    - phase: "流水线/上游并发改动后"
+      run: "uv run python -m unittest tests.test_pipeline_step2 tests.test_resolver_manager_step3 -v"
+    - phase: "入口或 server 链路改动后"
+      run: "uv run python -m unittest tests.test_udp_integration_step5 tests.test_tcp_integration_step5 -v"
+    - phase: "最终回归"
+      run: "uv run python -m unittest discover -s tests -v"
+
+risks_and_rollback:
+  risks:
+    - risk: "hook 顺序校验语义回归"
+      affected_files:
+        - config.py
+      detail: "若重构 `_validate_*_hook_order`，可能放宽或错误收紧既有约束。"
+    - risk: "默认装配行为偏移"
+      affected_files:
+        - main.py
+        - app.py
+        - config.py
+      detail: "去重默认定义时，可能导致默认 resolver/hook 集合变化。"
+    - risk: "上游并发提前返回语义变化"
+      affected_files:
+        - upstream/resolver_manager.py
+      detail: "first_success 与 wait_all 分支若改写不当，会改变 A/AAAA 与其他类型行为。"
+    - risk: "UDP 高并发任务处理时序变化"
+      affected_files:
+        - server/udp_server.py
+      detail: "任务管理重构可能影响连接关闭时 cancel 行为。"
+  rollback:
+    - "按步骤小批量提交：每一步改动限定在单一子域（配置/流水线/并发）。"
+    - "每步改动后运行对应最小测试集；失败即回滚该步提交。"
+    - "保留 `config.py` 中旧校验分支的临时对照测试（在重构 PR 中先新增后替换）。"
+    - "若默认装配统一后出现回归，优先恢复 `main.py` 原路径分支，再逐步收敛。"
+
+open_questions:
+  - question: "`main.py` 中 `else: build_pipeline()` 分支是否属于产品级保底需求，还是历史遗留？"
+    context: "`parse_args` 为 `--config` 提供默认值，常规路径下分支弱可达；去冗余前需明确保留策略。"
+  - question: "配置构建是否存在高频调用场景（热重载/多实例频繁重建）？"
+    context: "决定 `_load_class` 缓存和 `model_copy(deep=True)` 优化的收益优先级。"
+  - question: "上游并发管理是否计划升级为结构化并发模型？"
+    context: "影响 `ResolverManager.collect` 的重构边界和回滚复杂度。"
+
+gaps:
+  - area: 运行时性能数据
+    description: "未采集真实 QPS、P95/P99 延迟及 CPU flame graph，仅基于代码路径进行静态分析。"
+    impact: "性能瓶颈结论优先级需在压测后再排序。"
+  - area: 生产配置样本
+    description: "未读取实际生产 YAML 规模与 hook/resolver 数量分布。"
+    impact: "对配置构建阶段优化收益评估偏保守。"

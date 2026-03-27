@@ -1,0 +1,25 @@
+task_id: T06
+plan_id: plan-20260327-refactor-mydns
+agent: gem-reviewer
+status: failed
+failure_type: fixable
+retry: 1/2
+summary: |
+  T06 关键交付缺口仍存在：缺少最小烟测集合文档（建议 smoke_suite_t06.md）且 plan.yaml 状态未推进到 T06=completed、T07=current。
+findings:
+  - severity: high
+    category: missing_artifact
+    location: docs/plan/plan-20260327-refactor-mydns/
+    description: >-
+      未发现 smoke_suite_t06.md；现有 baseline_t01_smoke.md 非 T06 交付且未完整体现
+      "先烟测后全量" 执行流程与故障定位映射。
+  - severity: high
+    category: status_mismatch
+    location: docs/plan/plan-20260327-refactor-mydns/plan.yaml:264-314
+    description: >-
+      T06 当前仍为 current，T07 仍为 pending，未满足本次要求的状态推进。
+security:
+  issues: []
+notes:
+  - 已复核 docs/prd.yaml 不存在（与 plan.yaml 假设一致）。
+  - 本轮未执行大规模测试；遵循“可复用既有通过结果”约束。
