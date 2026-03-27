@@ -101,7 +101,9 @@ class DomainRuleRequestHook(RequestHook):
             {} if rules is None else {"rules": rules}
         )
         self.rules = _build_domain_rules(config.rules)
-        self.domainset_by_tag: dict[str, list[str]] = {tag: [] for tag in domainset.tags}
+        self.domainset_by_tag: dict[str, list[str]] = {
+            tag: [] for tag in domainset.tags
+        }
 
     async def on_request(self, ctx: QueryContext) -> None:
         qname_text = ctx.query.qname.to_text().rstrip(".").lower()
@@ -156,14 +158,13 @@ def normalize_domain_rules_config(raw_value: Any) -> dict[str, Any]:
     config = DomainRuleHookConfigModel.model_validate(
         {} if raw_value is None else {"rules": raw_value}
     )
-    return {
-        tag: dump_model_compact(rule)
-        for tag, rule in config.rules.items()
-    }
+    return {tag: dump_model_compact(rule) for tag, rule in config.rules.items()}
 
 
 def normalize_domain_rule_hook_kwargs(raw_kwargs: Any) -> dict[str, Any]:
-    config = DomainRuleHookConfigModel.model_validate({} if raw_kwargs is None else raw_kwargs)
+    config = DomainRuleHookConfigModel.model_validate(
+        {} if raw_kwargs is None else raw_kwargs
+    )
     return config.model_dump(mode="python", exclude_none=True)
 
 

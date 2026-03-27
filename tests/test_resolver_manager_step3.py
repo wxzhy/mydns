@@ -183,7 +183,9 @@ class TestResolverManagerStep3(unittest.IsolatedAsyncioTestCase):
         self.assertIn("fast", names)
         self.assertNotIn("cn-only", names)
 
-    async def test_resolver_specific_timeout_should_override_global_timeout(self) -> None:
+    async def test_resolver_specific_timeout_should_override_global_timeout(
+        self,
+    ) -> None:
         slow = _SleepResolver("slow", delay_s=0.3, timeout=0.05)
         manager = ResolverManager(resolvers=[slow])
 
@@ -326,9 +328,21 @@ class TestResolverManagerStep3(unittest.IsolatedAsyncioTestCase):
         manager = ResolverManager(
             resolvers=[
                 _SleepResolver("fast-error", delay_s=0.01, error=RuntimeError("err")),
-                _SleepResolver("fast-nxd", delay_s=0.02, answer=Answer.from_query(ctx.query, rcode=dns.rcode.NXDOMAIN)),
-                _SleepResolver("fast-good", delay_s=0.05, answer=Answer.from_query(ctx.query, rcode=dns.rcode.NOERROR)),
-                _SleepResolver("slow-good", delay_s=0.2, answer=Answer.from_query(ctx.query, rcode=dns.rcode.NOERROR)),
+                _SleepResolver(
+                    "fast-nxd",
+                    delay_s=0.02,
+                    answer=Answer.from_query(ctx.query, rcode=dns.rcode.NXDOMAIN),
+                ),
+                _SleepResolver(
+                    "fast-good",
+                    delay_s=0.05,
+                    answer=Answer.from_query(ctx.query, rcode=dns.rcode.NOERROR),
+                ),
+                _SleepResolver(
+                    "slow-good",
+                    delay_s=0.2,
+                    answer=Answer.from_query(ctx.query, rcode=dns.rcode.NOERROR),
+                ),
             ]
         )
         start = time.perf_counter()
@@ -384,8 +398,16 @@ class TestResolverManagerStep3(unittest.IsolatedAsyncioTestCase):
         ctx = self._new_ctx(dns.rdatatype.A)
         manager = ResolverManager(
             resolvers=[
-                _SleepResolver("fast", delay_s=0.02, answer=Answer.from_query(ctx.query, rcode=dns.rcode.NOERROR)),
-                _SleepResolver("slow", delay_s=0.16, answer=Answer.from_query(ctx.query, rcode=dns.rcode.NOERROR)),
+                _SleepResolver(
+                    "fast",
+                    delay_s=0.02,
+                    answer=Answer.from_query(ctx.query, rcode=dns.rcode.NOERROR),
+                ),
+                _SleepResolver(
+                    "slow",
+                    delay_s=0.16,
+                    answer=Answer.from_query(ctx.query, rcode=dns.rcode.NOERROR),
+                ),
             ]
         )
         start = time.perf_counter()
@@ -400,8 +422,16 @@ class TestResolverManagerStep3(unittest.IsolatedAsyncioTestCase):
         timing_hook = _TimingHook()
         manager = ResolverManager(
             resolvers=[
-                _SleepResolver("fast", delay_s=0.02, answer=Answer.from_query(ctx.query, rcode=dns.rcode.NOERROR)),
-                _SleepResolver("slow", delay_s=0.20, answer=Answer.from_query(ctx.query, rcode=dns.rcode.NOERROR)),
+                _SleepResolver(
+                    "fast",
+                    delay_s=0.02,
+                    answer=Answer.from_query(ctx.query, rcode=dns.rcode.NOERROR),
+                ),
+                _SleepResolver(
+                    "slow",
+                    delay_s=0.20,
+                    answer=Answer.from_query(ctx.query, rcode=dns.rcode.NOERROR),
+                ),
             ],
             resolver_hooks=[timing_hook],
         )
@@ -432,7 +462,9 @@ class TestResolverManagerStep3(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.ctx.candidates), 1)
         self.assertEqual(self.ctx.candidates[0].resolver_name, "good")
         self.assertIsNotNone(self.ctx.candidates[0].answer)
-        self.assertEqual(self.ctx.candidates[0].answer.response.rcode(), dns.rcode.NOERROR)
+        self.assertEqual(
+            self.ctx.candidates[0].answer.response.rcode(), dns.rcode.NOERROR
+        )
 
     async def test_hook_timeout_should_not_block_request(self) -> None:
         manager = ResolverManager(
@@ -454,7 +486,9 @@ class TestResolverManagerStep3(unittest.IsolatedAsyncioTestCase):
         self.assertLess(duration, 0.13)
         self.assertEqual(len(self.ctx.candidates), 1)
         self.assertIsNotNone(self.ctx.candidates[0].answer)
-        self.assertEqual(self.ctx.candidates[0].answer.response.rcode(), dns.rcode.NOERROR)
+        self.assertEqual(
+            self.ctx.candidates[0].answer.response.rcode(), dns.rcode.NOERROR
+        )
 
 
 if __name__ == "__main__":

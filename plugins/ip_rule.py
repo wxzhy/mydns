@@ -104,9 +104,7 @@ class _FamilyConfigModel(PluginConfigModel):
         seen_tags: set[str] = set()
         for replacement in self.replacements:
             if replacement.tag in seen_tags:
-                raise ValueError(
-                    "ip_rules.rules[*].*.replacements[*].tag 不能重复"
-                )
+                raise ValueError("ip_rules.rules[*].*.replacements[*].tag 不能重复")
             seen_tags.add(replacement.tag)
         return self
 
@@ -140,12 +138,16 @@ class IPRuleHookConfigModel(PluginConfigModel):
 
 
 def normalize_ip_rules_config(raw_value: Any) -> dict[str, Any]:
-    config = IPRuleHookConfigModel.model_validate({} if raw_value is None else raw_value)
+    config = IPRuleHookConfigModel.model_validate(
+        {} if raw_value is None else raw_value
+    )
     return dump_model_compact(config)
 
 
 def normalize_ip_rule_hook_kwargs(raw_kwargs: Any) -> dict[str, Any]:
-    config = IPRuleHookConfigModel.model_validate({} if raw_kwargs is None else raw_kwargs)
+    config = IPRuleHookConfigModel.model_validate(
+        {} if raw_kwargs is None else raw_kwargs
+    )
     return config.model_dump(mode="python", exclude_none=True)
 
 

@@ -56,11 +56,16 @@ class TestSpeedcheckHooks(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rrset.ttl, 900)
         self.assertEqual([rdata.to_text() for rdata in rrset], ["1.1.1.1", "8.8.8.8"])
 
-    async def test_resolver_hook_should_configure_global_probe_cache_from_kwargs(self) -> None:
+    async def test_resolver_hook_should_configure_global_probe_cache_from_kwargs(
+        self,
+    ) -> None:
         original_configure = speedcheck_module.configure
         built_args: list[tuple[int, float]] = []
         try:
-            def fake_configure(*, max_size: int | None = None, ttl_s: float | None = None) -> None:
+
+            def fake_configure(
+                *, max_size: int | None = None, ttl_s: float | None = None
+            ) -> None:
                 built_args.append((int(max_size or 0), float(ttl_s or 0)))
 
             speedcheck_module.configure = fake_configure
@@ -73,7 +78,9 @@ class TestSpeedcheckHooks(unittest.IsolatedAsyncioTestCase):
             speedcheck_module.configure = original_configure
 
     async def test_resolver_hook_collect_rtt(self) -> None:
-        async def fake_probe(ips: list[str], timeout_s: float) -> dict[str, float | None]:
+        async def fake_probe(
+            ips: list[str], timeout_s: float
+        ) -> dict[str, float | None]:
             _ = timeout_s
             return {ip: (10.0 if ip == "1.1.1.1" else 20.0) for ip in ips}
 
@@ -101,7 +108,9 @@ class TestSpeedcheckHooks(unittest.IsolatedAsyncioTestCase):
             "CNAME",
             "edge.example.com.",
         )
-        a_rr = dns.rrset.from_text("edge.example.com.", 30, "IN", "A", "9.9.9.9", "8.8.8.8")
+        a_rr = dns.rrset.from_text(
+            "edge.example.com.", 30, "IN", "A", "9.9.9.9", "8.8.8.8"
+        )
         ctx.final_answer = Answer.from_query(
             ctx.query,
             rcode=dns.rcode.NOERROR,
@@ -125,7 +134,7 @@ class TestSpeedcheckHooks(unittest.IsolatedAsyncioTestCase):
     async def test_non_a_record_not_rewrite(self) -> None:
         hook = RewriteAnswerByRTTHook(max_return_ips=2)
         ctx = _make_ctx(dns.rdatatype.TXT)
-        txt = dns.rrset.from_text("www.example.com.", 30, "IN", "TXT", "\"hello\"")
+        txt = dns.rrset.from_text("www.example.com.", 30, "IN", "TXT", '"hello"')
         ctx.final_answer = Answer.from_query(
             ctx.query,
             rcode=dns.rcode.NOERROR,
@@ -134,13 +143,13 @@ class TestSpeedcheckHooks(unittest.IsolatedAsyncioTestCase):
         ctx.ip_list.results = {"1.1.1.1": 5.0}
 
         await hook.on_response(ctx)
-        self.assertEqual(ctx.final_answer.response.answer[0][0].to_text(), "\"hello\"")
+        self.assertEqual(ctx.final_answer.response.answer[0][0].to_text(), '"hello"')
 
     async def test_response_hook_build_base_answer_when_final_missing(self) -> None:
         hook = RewriteAnswerByRTTHook(max_return_ips=2)
         ctx = _make_ctx(dns.rdatatype.TXT)
-        txt_fast = dns.rrset.from_text("www.example.com.", 30, "IN", "TXT", "\"fast\"")
-        txt_slow = dns.rrset.from_text("www.example.com.", 30, "IN", "TXT", "\"slow\"")
+        txt_fast = dns.rrset.from_text("www.example.com.", 30, "IN", "TXT", '"fast"')
+        txt_slow = dns.rrset.from_text("www.example.com.", 30, "IN", "TXT", '"slow"')
         ctx.candidates = [
             ResolverResult(
                 resolver_name="slow",
@@ -166,7 +175,7 @@ class TestSpeedcheckHooks(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNotNone(ctx.final_answer)
         self.assertEqual(ctx.final_answer.response.rcode(), dns.rcode.NOERROR)
-        self.assertEqual(ctx.final_answer.response.answer[0][0].to_text(), "\"fast\"")
+        self.assertEqual(ctx.final_answer.response.answer[0][0].to_text(), '"fast"')
 
     async def test_response_hook_backfill_when_target_rrset_missing(self) -> None:
         hook = RewriteAnswerByRTTHook(max_return_ips=2, ttl_s=900)
@@ -200,7 +209,9 @@ class TestSpeedcheckHooks(unittest.IsolatedAsyncioTestCase):
     async def test_duplicate_ips_probe_once_per_request(self) -> None:
         calls: list[list[str]] = []
 
-        async def fake_probe(ips: list[str], timeout_s: float) -> dict[str, float | None]:
+        async def fake_probe(
+            ips: list[str], timeout_s: float
+        ) -> dict[str, float | None]:
             _ = timeout_s
             calls.append(list(ips))
             return {ip: float(index + 1) for index, ip in enumerate(ips)}
@@ -227,7 +238,9 @@ class TestSpeedcheckHooks(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(calls), 2)
 
     async def test_probe_timeout_should_not_break_request(self) -> None:
-        async def slow_probe(ips: list[str], timeout_s: float) -> dict[str, float | None]:
+        async def slow_probe(
+            ips: list[str], timeout_s: float
+        ) -> dict[str, float | None]:
             _ = ips, timeout_s
             await asyncio.sleep(0.2)
             return {}

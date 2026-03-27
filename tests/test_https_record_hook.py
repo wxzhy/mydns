@@ -112,14 +112,18 @@ class _FakePipeline:
 
 class TestResponseGuardHelper(unittest.TestCase):
     def test_should_return_none_for_valid_response(self) -> None:
-        query = dns.message.make_query("example.com.", dns.rdatatype.A, dns.rdataclass.IN)
+        query = dns.message.make_query(
+            "example.com.", dns.rdatatype.A, dns.rdataclass.IN
+        )
         response = dns.message.make_response(query)
         response.set_rcode(dns.rcode.NOERROR)
 
         self.assertIsNone(response_guard_reason(response))
 
     def test_should_return_custom_reason_when_not_noerror(self) -> None:
-        query = dns.message.make_query("example.com.", dns.rdatatype.A, dns.rdataclass.IN)
+        query = dns.message.make_query(
+            "example.com.", dns.rdatatype.A, dns.rdataclass.IN
+        )
         response = dns.message.make_response(query)
         response.set_rcode(dns.rcode.SERVFAIL)
 
@@ -129,7 +133,9 @@ class TestResponseGuardHelper(unittest.TestCase):
         )
 
     def test_should_return_invalid_qclass_when_question_not_in(self) -> None:
-        query = dns.message.make_query("example.com.", dns.rdatatype.A, dns.rdataclass.CH)
+        query = dns.message.make_query(
+            "example.com.", dns.rdatatype.A, dns.rdataclass.CH
+        )
         response = dns.message.make_response(query)
 
         self.assertEqual(response_guard_reason(response), "invalid_qclass")
@@ -183,7 +189,9 @@ class TestHttpsRecordResponseHook(unittest.IsolatedAsyncioTestCase):
     async def test_should_skip_when_result_tags_match_skip_list(self) -> None:
         hook = HttpsRecordResponseHook(skip_result_tags={"ads"})
         ctx = _make_ctx(dns.rdatatype.HTTPS)
-        ctx.final_answer = _make_https_answer('1 . alpn="h2,h3"', tags={"default", "ads"})
+        ctx.final_answer = _make_https_answer(
+            '1 . alpn="h2,h3"', tags={"default", "ads"}
+        )
         ctx.state["pipeline"] = _FakePipeline({})
 
         await hook.on_response(ctx)
@@ -246,7 +254,10 @@ class TestHttpsRecordResponseHook(unittest.IsolatedAsyncioTestCase):
         hook = HttpsRecordResponseHook(cloudflare_tags={"cloudflare"})
         pipeline = _FakePipeline(
             {
-                ("cloudflare-ech.com.", int(dns.rdatatype.HTTPS)): _make_ech_source_answer(),
+                (
+                    "cloudflare-ech.com.",
+                    int(dns.rdatatype.HTTPS),
+                ): _make_ech_source_answer(),
             }
         )
         ctx = _make_ctx(dns.rdatatype.HTTPS)
@@ -275,7 +286,10 @@ class TestHttpsRecordResponseHook(unittest.IsolatedAsyncioTestCase):
             hook = HttpsRecordResponseHook(cloudflare_tags={"cloudflare"})
             pipeline = _FakePipeline(
                 {
-                    ("cloudflare-ech.com.", int(dns.rdatatype.HTTPS)): _make_ech_source_answer(),
+                    (
+                        "cloudflare-ech.com.",
+                        int(dns.rdatatype.HTTPS),
+                    ): _make_ech_source_answer(),
                 }
             )
             ctx = _make_ctx(dns.rdatatype.HTTPS)
@@ -287,7 +301,9 @@ class TestHttpsRecordResponseHook(unittest.IsolatedAsyncioTestCase):
         rdata = _first_rdata(ctx.final_answer)
         self.assertIn(svcbbase.ParamKey.ECH, rdata.params)
 
-    async def test_should_inject_ech_when_subquery_result_matches_cloudflare(self) -> None:
+    async def test_should_inject_ech_when_subquery_result_matches_cloudflare(
+        self,
+    ) -> None:
         hook = HttpsRecordResponseHook(cloudflare_tags={"cloudflare"})
         pipeline = _FakePipeline(
             {
@@ -301,7 +317,10 @@ class TestHttpsRecordResponseHook(unittest.IsolatedAsyncioTestCase):
                     _make_query(dns.rdatatype.AAAA, qname="svc.example.com."),
                     tags={"default"},
                 ),
-                ("cloudflare-ech.com.", int(dns.rdatatype.HTTPS)): _make_ech_source_answer(),
+                (
+                    "cloudflare-ech.com.",
+                    int(dns.rdatatype.HTTPS),
+                ): _make_ech_source_answer(),
             }
         )
         ctx = _make_ctx(dns.rdatatype.HTTPS)
@@ -335,7 +354,10 @@ class TestHttpsRecordResponseHook(unittest.IsolatedAsyncioTestCase):
                     _make_query(dns.rdatatype.AAAA, qname="svc.example.com."),
                     tags={"default"},
                 ),
-                ("cloudflare-ech.com.", int(dns.rdatatype.HTTPS)): _make_ech_source_answer(),
+                (
+                    "cloudflare-ech.com.",
+                    int(dns.rdatatype.HTTPS),
+                ): _make_ech_source_answer(),
             }
         )
         ctx = _make_ctx(dns.rdatatype.HTTPS)
@@ -377,7 +399,10 @@ class TestHttpsRecordResponseHook(unittest.IsolatedAsyncioTestCase):
         hook = HttpsRecordResponseHook(cloudflare_tags={"cloudflare"})
         pipeline = _FakePipeline(
             {
-                ("cloudflare-ech.com.", int(dns.rdatatype.HTTPS)): _make_ech_source_answer(),
+                (
+                    "cloudflare-ech.com.",
+                    int(dns.rdatatype.HTTPS),
+                ): _make_ech_source_answer(),
             }
         )
 

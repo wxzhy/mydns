@@ -76,11 +76,21 @@ class TestConfig(unittest.TestCase):
         self.assertTrue(runtime.server.tcp)
         self.assertAlmostEqual(runtime.pipeline.upstream_timeout_s, 1.2)
         self.assertEqual(len(runtime.pipeline.resolver_manager.resolvers), 2)
-        self.assertIsInstance(runtime.pipeline.resolver_manager.resolvers[0], UdpUpstreamResolver)
-        self.assertEqual(runtime.pipeline.resolver_manager.resolvers[0].tags, {"default", "oversea"})
-        self.assertIsInstance(runtime.pipeline.resolver_manager.resolvers[1], QuicUpstreamResolver)
-        self.assertIsInstance(runtime.pipeline.resolver_manager.resolver_hooks[0], SpeedCheckResolverHook)
-        self.assertAlmostEqual(runtime.pipeline.resolver_manager.resolver_hooks[0].timeout_s, 0.3)
+        self.assertIsInstance(
+            runtime.pipeline.resolver_manager.resolvers[0], UdpUpstreamResolver
+        )
+        self.assertEqual(
+            runtime.pipeline.resolver_manager.resolvers[0].tags, {"default", "oversea"}
+        )
+        self.assertIsInstance(
+            runtime.pipeline.resolver_manager.resolvers[1], QuicUpstreamResolver
+        )
+        self.assertIsInstance(
+            runtime.pipeline.resolver_manager.resolver_hooks[0], SpeedCheckResolverHook
+        )
+        self.assertAlmostEqual(
+            runtime.pipeline.resolver_manager.resolver_hooks[0].timeout_s, 0.3
+        )
         self.assertEqual(runtime.pipeline.response_hooks[0].max_return_ips, 1)
 
     def test_speedcheck_hook_cache_config_should_load(self) -> None:
@@ -140,8 +150,12 @@ class TestConfig(unittest.TestCase):
             path.write_text(textwrap.dedent(content), encoding="utf-8")
             runtime = load_runtime_config(path)
 
-        self.assertIsInstance(runtime.pipeline.response_hooks[0], HttpsRecordResponseHook)
-        self.assertEqual(runtime.pipeline.response_hooks[0].cloudflare_tags, {"cloudflare"})
+        self.assertIsInstance(
+            runtime.pipeline.response_hooks[0], HttpsRecordResponseHook
+        )
+        self.assertEqual(
+            runtime.pipeline.response_hooks[0].cloudflare_tags, {"cloudflare"}
+        )
 
     def test_https_record_response_hook_should_validate_skip_tags(self) -> None:
         raw = {
@@ -159,7 +173,9 @@ class TestConfig(unittest.TestCase):
                 ]
             },
         }
-        with tempfile.TemporaryDirectory(prefix="mydns-https-response-hook-skip-") as td:
+        with tempfile.TemporaryDirectory(
+            prefix="mydns-https-response-hook-skip-"
+        ) as td:
             base = Path(td)
             (base / "cloudflare.txt").write_text("1.1.1.0/24\n", encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "未定义的结果 tag"):
@@ -245,7 +261,9 @@ class TestConfig(unittest.TestCase):
             },
         }
 
-        with tempfile.TemporaryDirectory(prefix="mydns-domain-rule-before-cache-") as td:
+        with tempfile.TemporaryDirectory(
+            prefix="mydns-domain-rule-before-cache-"
+        ) as td:
             base = Path(td)
             (base / "domains.txt").write_text("example.cn\n", encoding="utf-8")
             with self.assertRaisesRegex(
@@ -371,7 +389,9 @@ class TestConfig(unittest.TestCase):
             )
 
             runtime = load_runtime_config(base / "mydns.yaml")
-            self.assertIsInstance(runtime.pipeline.request_hooks[0], DomainRuleRequestHook)
+            self.assertIsInstance(
+                runtime.pipeline.request_hooks[0], DomainRuleRequestHook
+            )
             hook = runtime.pipeline.request_hooks[0]
             self.assertIn("cn", hook.domainset_by_tag)
             self.assertTrue(hook.rules)
@@ -382,7 +402,9 @@ class TestConfig(unittest.TestCase):
                 )
             )
 
-    def test_domain_rule_hook_should_load_after_cache_when_declared_manually(self) -> None:
+    def test_domain_rule_hook_should_load_after_cache_when_declared_manually(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory(prefix="mydns-domain-rule-order-") as td:
             base = Path(td)
             (base / "domains.txt").write_text("example.cn\n", encoding="utf-8")
@@ -536,10 +558,12 @@ class TestConfig(unittest.TestCase):
                         },
                     },
                 ]
-            }
+            },
         }
 
-        with tempfile.TemporaryDirectory(prefix="mydns-ip-rule-speedcheck-order-") as td:
+        with tempfile.TemporaryDirectory(
+            prefix="mydns-ip-rule-speedcheck-order-"
+        ) as td:
             base = Path(td)
             (base / "domains.txt").write_text("example.cn\n", encoding="utf-8")
             (base / "ips.txt").write_text("10.0.0.0/8\n", encoding="utf-8")

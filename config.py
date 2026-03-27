@@ -299,7 +299,9 @@ class ResolverSpecModel(BaseModel):
             kwargs = dict(self.kwargs)
         else:
             assert self.type is not None
-            resolver_cls = _load_class(_RESOLVER_TYPES[self.type], expected_base=Resolver)
+            resolver_cls = _load_class(
+                _RESOLVER_TYPES[self.type], expected_base=Resolver
+            )
             kwargs = dict(self.model_extra or {})
             if self.name is not None:
                 kwargs["name"] = self.name
@@ -533,7 +535,9 @@ def build_runtime_config(
 
     pipeline = Pipeline(
         resolvers=[spec.build_resolver() for spec in parsed.effective_resolver_specs()],
-        request_hooks=_build_hook_objects(request_hook_specs, expected_base=RequestHook),
+        request_hooks=_build_hook_objects(
+            request_hook_specs, expected_base=RequestHook
+        ),
         resolver_hooks=_build_hook_objects(
             resolver_hook_specs,
             expected_base=ResolverHook,
@@ -616,7 +620,9 @@ def _apply_top_level_ip_rules(
     return updated
 
 
-def _normalize_hook_kwargs(class_path: str, raw_kwargs: dict[str, Any]) -> dict[str, Any]:
+def _normalize_hook_kwargs(
+    class_path: str, raw_kwargs: dict[str, Any]
+) -> dict[str, Any]:
     normalizer = _HOOK_KWARG_NORMALIZERS.get(class_path)
     kwargs = dict(raw_kwargs)
     if normalizer is None:
@@ -643,7 +649,9 @@ def _parse_ecs_option(raw_value: Any, *, key: str) -> dns.edns.ECSOption:
     raise TypeError("unreachable")
 
 
-def _find_hooks(specs: Sequence[HookSpecModel], *, class_path: str) -> list[HookSpecModel]:
+def _find_hooks(
+    specs: Sequence[HookSpecModel], *, class_path: str
+) -> list[HookSpecModel]:
     return [spec for spec in specs if spec.class_path == class_path]
 
 
@@ -692,7 +700,11 @@ def _validate_resolver_hook_order(hooks: Sequence[HookSpecModel]) -> None:
     tagset_indexes = hook_indexes.get(_TAGSET_RESOLVER_HOOK, [])
     ip_rule_indexes = hook_indexes.get(_IP_RULE_RESOLVER_HOOK, [])
     speedcheck_indexes = hook_indexes.get(_SPEEDCHECK_RESOLVER_HOOK, [])
-    if tagset_indexes and ip_rule_indexes and min(tagset_indexes) > min(ip_rule_indexes):
+    if (
+        tagset_indexes
+        and ip_rule_indexes
+        and min(tagset_indexes) > min(ip_rule_indexes)
+    ):
         raise ValueError(
             "plugins.tagset.TagSetResolverHook 必须位于 "
             "plugins.ip_rule.IPRuleResolverHook 之前"
